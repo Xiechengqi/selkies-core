@@ -1,0 +1,296 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: amd64
+            docker_platform: linux/amd64
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
+            docker_platform: linux/arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build in Docker container
+        run: |
+          # Create build script
+          cat > build.sh << 'BUILDSCRIPT'
+          #!/bin/bash
+          set -e
+
+          # Install system dependencies
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            curl \
+            ca-certificates \
+            libjpeg-turbo8-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libssl-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
+
+          # Install Rust
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source $HOME/.cargo/env
+
+          # Build release
+          cd /workspace
+          cargo build --release --locked
+
+          # Copy binary to output
+          cp target/release/selkies-core /output/selkies-core-linux-$ARCH
+          BUILDSCRIPT
+
+          chmod +x build.sh
+
+          # Create output directory
+          mkdir -p output
+
+          # Run build in Docker container
+          docker run --rm \
+            --platform ${{ matrix.docker_platform }} \
+            -v $(pwd):/workspace \
+            -v $(pwd)/output:/output \
+            -v $(pwd)/build.sh:/build.sh \
+            -e ARCH=${{ matrix.arch }} \
+            ubuntu:22.04 \
+            /bin/bash /build.sh
+
+      - name: Verify binary
+        run: |
+          ls -lh output/
+          file output/selkies-core-linux-${{ matrix.arch }} || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: selkies-core-${{ matrix.arch }}
+          path: output/selkies-core-linux-${{ matrix.arch }}
+
+  # Build WebSocket-only version (lighter, easier to cross-compile)
+  build-ws:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: amd64
+            docker_platform: linux/amd64
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
+            docker_platform: linux/arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build WebSocket-only version in Docker
+        run: |
+          cat > build-ws.sh << 'BUILDSCRIPT'
+          #!/bin/bash
+          set -e
+
+          # Install minimal dependencies (no GStreamer)
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            curl \
+            ca-certificates \
+            libjpeg-turbo8-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libssl-dev
+
+          # Install Rust
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source $HOME/.cargo/env
+
+          # Build WebSocket-only version
+          cd /workspace
+          cargo build --release --locked --no-default-features --features websocket-legacy,native-tls
+
+          # Copy binary
+          cp target/release/selkies-core /output/selkies-core-ws-linux-$ARCH
+          BUILDSCRIPT
+
+          chmod +x build-ws.sh
+          mkdir -p output
+
+          docker run --rm \
+            --platform ${{ matrix.docker_platform }} \
+            -v $(pwd):/workspace \
+            -v $(pwd)/output:/output \
+            -v $(pwd)/build-ws.sh:/build-ws.sh \
+            -e ARCH=${{ matrix.arch }} \
+            ubuntu:22.04 \
+            /bin/bash /build-ws.sh
+
+      - name: Verify binary
+        run: |
+          ls -lh output/
+          file output/selkies-core-ws-linux-${{ matrix.arch }} || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: selkies-core-ws-${{ matrix.arch }}
+          path: output/selkies-core-ws-linux-${{ matrix.arch }}
+
+  release:
+    needs: [build, build-ws]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release-files
+
+          # Full version (WebRTC + GStreamer)
+          cp artifacts/selkies-core-amd64/selkies-core-linux-amd64 release-files/ || true
+          cp artifacts/selkies-core-arm64/selkies-core-linux-arm64 release-files/ || true
+
+          # WebSocket-only version (lighter)
+          cp artifacts/selkies-core-ws-amd64/selkies-core-ws-linux-amd64 release-files/ || true
+          cp artifacts/selkies-core-ws-arm64/selkies-core-ws-linux-arm64 release-files/ || true
+
+          # Make executable
+          chmod +x release-files/* || true
+
+          echo "Release files:"
+          ls -lh release-files/
+
+      - name: Get version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=v${VERSION}" >> $GITHUB_OUTPUT
+          echo "Current version: v${VERSION}"
+
+      - name: Delete existing latest release and tag
+        run: |
+          gh release delete latest --yes || true
+          git push origin :refs/tags/latest || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Create latest tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f latest
+          git push -f origin latest
+
+      - name: Create or Update Latest Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest Build (${{ steps.version.outputs.version }})"
+          body: |
+            ## 最新自动构建版本
+
+            **版本**: ${{ steps.version.outputs.version }}
+            **提交**: ${{ github.sha }}
+            **分支**: ${{ github.ref_name }}
+            **构建时间**: ${{ github.event.head_commit.timestamp }}
+
+            ### 变更内容
+
+            ${{ github.event.head_commit.message }}
+
+            ---
+
+            ### 下载
+
+            #### 完整版 (WebRTC + GStreamer)
+
+            需要系统安装 GStreamer 运行时库。
+
+            | 架构 | 文件名 |
+            |------|--------|
+            | AMD64 | `selkies-core-linux-amd64` |
+            | ARM64 | `selkies-core-linux-arm64` |
+
+            #### WebSocket 版 (轻量级)
+
+            无需 GStreamer，适合简单部署场景。
+
+            | 架构 | 文件名 |
+            |------|--------|
+            | AMD64 | `selkies-core-ws-linux-amd64` |
+            | ARM64 | `selkies-core-ws-linux-arm64` |
+
+            ---
+
+            ### 快速安装
+
+            ```bash
+            # AMD64 完整版
+            wget https://github.com/${{ github.repository }}/releases/download/latest/selkies-core-linux-amd64 -O selkies-core
+            chmod +x selkies-core
+
+            # ARM64 完整版
+            wget https://github.com/${{ github.repository }}/releases/download/latest/selkies-core-linux-arm64 -O selkies-core
+            chmod +x selkies-core
+
+            # WebSocket 轻量版 (AMD64)
+            wget https://github.com/${{ github.repository }}/releases/download/latest/selkies-core-ws-linux-amd64 -O selkies-core
+            chmod +x selkies-core
+            ```
+
+            ### 运行时依赖
+
+            **完整版需要安装：**
+            ```bash
+            apt-get install libjpeg-turbo8 libx11-6 libxcb1 \
+              gstreamer1.0-tools gstreamer1.0-plugins-base \
+              gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+              gstreamer1.0-x
+            ```
+
+            **WebSocket 版需要安装：**
+            ```bash
+            apt-get install libjpeg-turbo8 libx11-6 libxcb1
+            ```
+
+          files: release-files/*
+          prerelease: false
+          draft: false

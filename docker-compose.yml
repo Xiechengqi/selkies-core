@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  selkies-core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: selkies-core
+    ports:
+      - "8000:8000"
+      - "8080:8080"
+    environment:
+      - DISPLAY=:99
+      - SELKIES_LOG=info
+    volumes:
+      - ./config.toml:/etc/selkies-core.toml:ro
+    restart: unless-stopped
+    networks:
+      - selkies-net
+
+  xvfb:
+    image: ubuntu:22.04
+    container_name: selkies-xvfb
+    command: >
+      bash -c "apt-get update &&
+               apt-get install -y xvfb openbox x11-apps &&
+               Xvfb :99 -screen 0 1920x1080x24 &
+               sleep 2 &&
+               DISPLAY=:99 openbox &
+               tail -f /dev/null"
+    environment:
+      - DISPLAY=:99
+    networks:
+      - selkies-net
+
+networks:
+  selkies-net:
+    driver: bridge

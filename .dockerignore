@@ -1,0 +1,13 @@
+target/
+.git/
+.github/
+*.md
+!README.md
+.gitignore
+.dockerignore
+docker-compose.yml
+Dockerfile
+*.sh
+benches/
+examples/
+docs/

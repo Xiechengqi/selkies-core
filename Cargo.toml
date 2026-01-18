@@ -1,0 +1,143 @@
+[package]
+name = "selkies-core"
+version = "0.2.0"
+edition = "2021"
+description = "Rust-based Selkies streaming core - WebRTC + GStreamer / WebSocket, X11"
+authors = ["Selkies Team"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# WebSocket server
+tungstenite = { version = "0.21", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.23", features = ["native-tls"] }
+websocket = "0.26"
+
+# X11 bindings
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "xtest", "xfixes", "shm"] }
+
+# Image encoding
+turbojpeg = "0.3"
+image = { version = "0.24", default-features = false, features = ["jpeg", "png"] }
+
+# Hash for change detection
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+
+# Base64 encoding for WebSocket messages
+base64 = "0.22"
+
+# Async utilities
+futures = "0.3"
+
+# Configuration
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+clap = { version = "4.0", features = ["derive"] }
+
+# Concurrency
+crossbeam = "0.8"
+parking_lot = "0.12"
+
+# Logging
+env_logger = "0.10"
+log = "0.4"
+
+# File watching for configuration reload
+notify = { version = "6.0" }
+
+# HTTP server for static files / health checks
+axum = { version = "0.8", features = ["ws"] }
+tower = { version = "0.4" }
+hyper = { version = "1.0" }
+tower-http = { version = "0.5", features = ["fs"] }
+
+# UUID for session tracking
+uuid = { version = "1.0", features = ["v4"] }
+
+# Metrics
+prometheus = "0.13"
+
+# Compression for network efficiency
+flate2 = "1.0"
+miniz_oxide = "0.7"
+
+# Audio capture/encoding (optional)
+cpal = { version = "0.15", optional = true }
+opus = { version = "0.3", optional = true }
+libpulse-simple-binding = { version = "2.28", optional = true }
+libpulse-binding = { version = "2.28", optional = true }
+
+# Memory management
+mimalloc = "0.1"
+libc = "0.2"
+
+# WebRTC stack (optional)
+webrtc = { version = "0.11", optional = true }
+webrtc-util = { version = "0.9", optional = true }
+webrtc-ice = { version = "0.11", optional = true }
+webrtc-dtls = { version = "0.9", optional = true }
+webrtc-srtp = { version = "0.13", optional = true }
+webrtc-media = { version = "0.8", optional = true }
+webrtc-sctp = { version = "0.10", optional = true }
+
+# GStreamer bindings (optional)
+gstreamer = { version = "0.22", optional = true }
+gstreamer-app = { version = "0.22", optional = true }
+gstreamer-video = { version = "0.22", optional = true }
+gstreamer-rtp = { version = "0.22", optional = true }
+glib = { version = "0.19", optional = true }
+
+# RTP handling
+rtp = { version = "0.10", optional = true }
+bytes = "1.5"
+
+[build-dependencies]
+cc = "1.0"
+
+[features]
+default = ["native-tls", "webrtc-streaming"]
+native-tls = ["tungstenite/native-tls"]
+rustls = ["tungstenite/__rustls-tls"]
+audio = ["cpal", "opus"]
+pulseaudio = ["opus", "libpulse-simple-binding", "libpulse-binding"]
+
+# WebRTC streaming with GStreamer
+webrtc-streaming = [
+    "dep:webrtc",
+    "dep:webrtc-util",
+    "dep:webrtc-ice",
+    "dep:webrtc-dtls",
+    "dep:webrtc-srtp",
+    "dep:webrtc-media",
+    "dep:webrtc-sctp",
+    "dep:gstreamer",
+    "dep:gstreamer-app",
+    "dep:gstreamer-video",
+    "dep:gstreamer-rtp",
+    "dep:glib",
+    "dep:rtp",
+]
+
+# Hardware acceleration options
+vaapi = []       # Intel VA-API hardware encoding
+nvenc = []       # NVIDIA NVENC hardware encoding
+qsv = []         # Intel Quick Sync Video
+
+# Legacy WebSocket-only mode (no WebRTC)
+websocket-legacy = []
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "encode"
+harness = false

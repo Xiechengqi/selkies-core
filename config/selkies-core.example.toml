@@ -1,0 +1,106 @@
+# Default configuration for selkies-core
+# Copy this to /etc/selkies-core/selkies-core.toml
+
+[server]
+foreground = false
+pidfile = "/var/run/selkies-core/selkies-core.pid"
+user = "selkies"
+group = "selkies"
+
+[display]
+# X11 display number (use :0 for default X server, or configure Xvfb)
+display = ":12"
+
+# Screen resolution
+width = 1920
+height = 1080
+
+# Refresh rate in Hz
+refresh_rate = 60
+
+# Enable multi-monitor support (requires Xinerama/RANDR)
+multi_monitor = false
+
+[websocket]
+# Bind address
+host = "0.0.0.0"
+
+# WebSocket port for video streaming
+port = 8007
+
+# Maximum concurrent connections
+max_connections = 100
+
+# Connection timeout in seconds
+connection_timeout = 30
+
+# Enable per-message compression
+compression = true
+
+[http]
+# HTTP bind address
+host = "0.0.0.0"
+
+# HTTP port for health checks and metrics
+port = 8008
+
+# CORS origin (set to specific domain or "*" for all, comment out for none)
+# cors_origin = "*"
+
+[encoding]
+# JPEG quality (1-100, higher = better quality but more bandwidth)
+jpeg_quality = 75
+
+# Stripe height in pixels (must be power of 2, 64 recommended)
+stripe_height = 64
+
+# Target FPS
+target_fps = 30
+
+# Maximum FPS
+max_fps = 60
+
+# Keyframe interval in frames (0 = every frame)
+keyframe_interval = 300
+
+# Bandwidth limit in bytes/sec (0 = unlimited)
+bandwidth_limit = 0
+
+# Enable adaptive quality based on bandwidth
+adaptive_quality = true
+
+[input]
+# Enable keyboard input injection
+enable_keyboard = true
+
+# Enable mouse input injection
+enable_mouse = true
+
+# Enable clipboard synchronization
+enable_clipboard = true
+
+# Mouse sensitivity multiplier
+mouse_sensitivity = 1.0
+
+[audio]
+# Enable audio streaming
+enabled = false
+
+# Sample rate in Hz
+sample_rate = 48000
+
+# Channel count (1=mono, 2=stereo)
+channels = 2
+
+# Bitrate in bits per second
+bitrate = 128000
+
+[logging]
+# Log level: error, warn, info, debug, trace
+level = "info"
+
+# Log file path (null = stdout only)
+logfile = "/var/log/selkies-core.log"
+
+# Log format: json, text
+format = "json"

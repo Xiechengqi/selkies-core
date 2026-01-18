@@ -1,0 +1,126 @@
+# Selkies Core Configuration Example
+# Copy this file to config.toml and customize as needed
+
+[server]
+# Run in foreground (true) or daemonize (false)
+foreground = true
+
+[display]
+# X11 display to capture (e.g., ":0", ":1")
+display = ":0"
+# Display width (0 = auto-detect)
+width = 0
+# Display height (0 = auto-detect)
+height = 0
+
+[websocket]
+# WebSocket server host
+host = "0.0.0.0"
+# WebSocket server port
+port = 8080
+
+[http]
+# HTTP server port (for health checks and WebRTC signaling)
+port = 8000
+
+[encoding]
+# Target frames per second
+target_fps = 30
+# Maximum frames per second
+max_fps = 60
+# JPEG quality (1-100, higher = better quality)
+jpeg_quality = 80
+# Stripe height for JPEG encoding (pixels)
+stripe_height = 16
+
+[input]
+# Enable keyboard input
+enable_keyboard = true
+# Enable mouse input
+enable_mouse = true
+# Enable clipboard sync
+enable_clipboard = true
+# Mouse sensitivity multiplier
+mouse_sensitivity = 1.0
+
+[audio]
+# Enable audio streaming
+enabled = false
+# Audio sample rate (Hz)
+sample_rate = 48000
+# Number of audio channels (1 = mono, 2 = stereo)
+channels = 2
+# Audio bitrate (bits per second)
+bitrate = 128000
+
+[logging]
+# Log level: "trace", "debug", "info", "warn", "error"
+level = "info"
+# Optional log file path (comment out for stdout only)
+# logfile = "/var/log/selkies-core.log"
+# Log format: "json" or "text"
+format = "json"
+
+# ============================================================================
+# WebRTC Configuration (requires webrtc-streaming feature)
+# ============================================================================
+
+[webrtc]
+# Enable WebRTC streaming (default: true if feature is enabled)
+enabled = true
+
+# Video codec: "h264", "vp8", "vp9", "av1"
+video_codec = "h264"
+
+# Target video bitrate in kbps
+video_bitrate = 4000
+
+# Maximum video bitrate in kbps
+video_bitrate_max = 8000
+
+# Minimum video bitrate in kbps
+video_bitrate_min = 500
+
+# Hardware encoder: "auto", "software", "vaapi", "nvenc", "qsv"
+# - auto: Automatically detect best available encoder
+# - software: Use CPU-based encoding (x264enc, vp8enc, etc.)
+# - vaapi: Intel/AMD VA-API hardware encoding
+# - nvenc: NVIDIA NVENC hardware encoding
+# - qsv: Intel Quick Sync Video hardware encoding
+hardware_encoder = "auto"
+
+# Enable adaptive bitrate control
+adaptive_bitrate = true
+
+# Congestion control algorithm: "goog-remb" or "transport-cc"
+congestion_control = "goog-remb"
+
+# Maximum latency target in milliseconds
+max_latency_ms = 100
+
+# Enable forward error correction (FEC)
+fec_enabled = false
+
+# Enable retransmissions (RTX)
+rtx_enabled = true
+
+# GStreamer pipeline latency in milliseconds
+pipeline_latency_ms = 50
+
+# Keyframe interval in frames (lower = more keyframes = better error recovery)
+keyframe_interval = 60
+
+# ICE servers for NAT traversal (STUN/TURN)
+# Multiple servers can be configured for redundancy
+[[webrtc.ice_servers]]
+urls = ["stun:stun.l.google.com:19302"]
+
+# Example TURN server configuration (uncomment to use)
+# [[webrtc.ice_servers]]
+# urls = ["turn:turn.example.com:3478"]
+# username = "your-username"
+# credential = "your-password"
+
+# Additional public STUN servers (optional)
+# [[webrtc.ice_servers]]
+# urls = ["stun:stun1.l.google.com:19302", "stun:stun2.l.google.com:19302"]

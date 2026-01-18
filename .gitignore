@@ -1,0 +1,28 @@
+# Build artifacts
+target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local configuration
+config/*.toml
+!config/selkies-core.example.toml
+
+# Runtime files
+*.pid
+*.log
+
+# Secrets
+*.pem
+*.key
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+coverage/
