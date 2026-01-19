@@ -200,7 +200,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gst_handle = if config.webrtc.enabled && session_manager.is_some() {
         let gst_state = state.clone();
         let gst_running = running.clone();
-        let pipeline_config = PipelineConfig::from(&config.webrtc);
+        let mut pipeline_config = PipelineConfig::from(&config.webrtc);
+        // Use the display created/detected by display manager
+        pipeline_config.display = config.display.display.clone();
 
         Some(task::spawn_blocking(move || {
             info!("Starting GStreamer pipeline...");
