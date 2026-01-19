@@ -160,6 +160,11 @@ pub struct DisplayConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebSocketConfig {
+    /// Enable WebSocket streaming server (legacy mode)
+    /// Default: false when webrtc-streaming feature is enabled, true otherwise
+    #[serde(default = "default_websocket_enabled")]
+    pub enabled: bool,
+
     /// Bind host
     pub host: String,
 
@@ -371,6 +376,7 @@ impl Default for Config {
                 x11_extra_args: Vec::new(),
             },
             websocket: WebSocketConfig {
+                enabled: default_websocket_enabled(),
                 host: "0.0.0.0".to_string(),
                 port: 8007,
                 max_connections: 100,
@@ -499,6 +505,20 @@ mod tests {
         cfg.audio.enabled = true;
         cfg.audio.channels = 3;
         assert!(cfg.validate().is_err());
+    }
+}
+
+// Default value functions for WebSocketConfig
+/// WebSocket is disabled by default when WebRTC is available,
+/// enabled when building WebSocket-only binary
+fn default_websocket_enabled() -> bool {
+    #[cfg(feature = "webrtc-streaming")]
+    {
+        false
+    }
+    #[cfg(not(feature = "webrtc-streaming"))]
+    {
+        true
     }
 }
 

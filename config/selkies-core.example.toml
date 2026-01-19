@@ -22,6 +22,11 @@ refresh_rate = 60
 multi_monitor = false
 
 [websocket]
+# Enable WebSocket streaming server (legacy mode)
+# Default: false when WebRTC is available, true for WebSocket-only builds
+# Set to true to run WebSocket server alongside WebRTC
+enabled = false
+
 # Bind address
 host = "0.0.0.0"
 

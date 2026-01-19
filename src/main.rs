@@ -182,18 +182,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(feature = "webrtc-streaming"))]
     let session_manager: Option<Arc<()>> = None;
 
-    // Start WebSocket server
-    let ws_server = transport::WebSocketServer::new(
-        config.websocket.host.clone(),
-        config.websocket.port,
-        state.clone(),
-    );
+    // Start WebSocket server (if enabled)
+    let mut server_handle = if config.websocket.enabled {
+        info!("Starting WebSocket streaming server on {}:{}...", config.websocket.host, config.websocket.port);
+        let ws_server = transport::WebSocketServer::new(
+            config.websocket.host.clone(),
+            config.websocket.port,
+            state.clone(),
+        );
 
-    let mut server_handle = task::spawn(async move {
-        if let Err(e) = ws_server.run().await {
-            error!("WebSocket server error: {}", e);
-        }
-    });
+        Some(task::spawn(async move {
+            if let Err(e) = ws_server.run().await {
+                error!("WebSocket server error: {}", e);
+            }
+        }))
+    } else {
+        info!("WebSocket streaming server disabled (WebRTC mode)");
+        None
+    };
 
     // Start GStreamer pipeline for WebRTC (if enabled)
     #[cfg(feature = "webrtc-streaming")]
@@ -712,7 +718,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ = shutdown => {
                 info!("Initiating graceful shutdown...");
             }
-            result = &mut server_handle => {
+            result = async { server_handle.as_mut().unwrap().await }, if server_handle.is_some() => {
                 log_async_task_result("WebSocket server", result);
             }
             result = &mut capture_handle => {
@@ -736,7 +742,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ = shutdown => {
                 info!("Initiating graceful shutdown...");
             }
-            result = &mut server_handle => {
+            result = async { server_handle.as_mut().unwrap().await }, if server_handle.is_some() => {
                 log_async_task_result("WebSocket server", result);
             }
             result = &mut capture_handle => {
@@ -760,9 +766,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Stopping all tasks...");
 
     // Stop WebSocket server
-    if !server_handle.is_finished() {
-        server_handle.abort();
-        let _ = server_handle.await;
+    if let Some(handle) = server_handle {
+        if !handle.is_finished() {
+            handle.abort();
+            let _ = handle.await;
+        }
     }
 
     // Stop HTTP server
