@@ -45,7 +45,7 @@ jobs:
             pkg-config \
             curl \
             ca-certificates \
-            libjpeg-turbo8-dev \
+            libturbojpeg0-dev \
             libx11-dev \
             libxcb1-dev \
             libxkbcommon-dev \
@@ -127,7 +127,7 @@ jobs:
             pkg-config \
             curl \
             ca-certificates \
-            libjpeg-turbo8-dev \
+            libturbojpeg0-dev \
             libx11-dev \
             libxcb1-dev \
             libxkbcommon-dev \

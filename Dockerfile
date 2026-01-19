@@ -4,7 +4,7 @@ FROM rust:1.70 AS builder
 RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
-    libjpeg-turbo8-dev \
+    libturbojpeg0-dev \
     libx11-dev \
     libxcb1-dev \
     libxkbcommon-dev \
