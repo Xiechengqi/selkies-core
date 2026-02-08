@@ -58,7 +58,6 @@ jobs:
             pkg-config \
             curl \
             ca-certificates \
-            libturbojpeg0-dev \
             libx11-dev \
             libxcb1-dev \
             libxkbcommon-dev \
@@ -104,96 +103,6 @@ jobs:
           name: selkies-core-${{ matrix.arch }}
           path: output/selkies-core-linux-${{ matrix.arch }}
 
-  # # Build WebSocket-only version (lighter, easier to cross-compile)
-  # build-ws:
-  #   runs-on: ubuntu-latest
-  #   strategy:
-  #     matrix:
-  #       include:
-  #         - target: x86_64-unknown-linux-gnu
-  #           arch: amd64
-  #           docker_platform: linux/amd64
-  #         - target: aarch64-unknown-linux-gnu
-  #           arch: arm64
-  #           docker_platform: linux/arm64
-  #
-  #   steps:
-  #     - name: Checkout code
-  #       uses: actions/checkout@v4
-  #
-  #     - name: Setup Node.js
-  #       uses: actions/setup-node@v4
-  #       with:
-  #         node-version: '20'
-  #         cache: 'npm'
-  #         cache-dependency-path: web/selkies/package-lock.json
-  #
-  #     - name: Build frontend
-  #       run: |
-  #         cd web/selkies
-  #         npm ci
-  #         npm run build
-  #
-  #     - name: Set up QEMU
-  #       uses: docker/setup-qemu-action@v3
-  #
-  #     - name: Set up Docker Buildx
-  #       uses: docker/setup-buildx-action@v3
-  #
-  #     - name: Build WebSocket-only version in Docker
-  #       run: |
-  #         cat > build-ws.sh << 'BUILDSCRIPT'
-  #         #!/bin/bash
-  #         set -e
-  #
-  #         # Install minimal dependencies (no GStreamer)
-  #         apt-get update
-  #         apt-get install -y --no-install-recommends \
-  #           build-essential \
-  #           pkg-config \
-  #           curl \
-  #           ca-certificates \
-  #           libturbojpeg0-dev \
-  #           libx11-dev \
-  #           libxcb1-dev \
-  #           libxkbcommon-dev \
-  #           libssl-dev
-  #
-  #         # Install Rust
-  #         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-  #         source $HOME/.cargo/env
-  #
-  #         # Build WebSocket-only version
-  #         cd /workspace
-  #         cargo build --release --locked --no-default-features --features websocket-legacy,native-tls
-  #
-  #         # Copy binary
-  #         cp target/release/selkies-core /output/selkies-core-ws-linux-$ARCH
-  #         BUILDSCRIPT
-  #
-  #         chmod +x build-ws.sh
-  #         mkdir -p output
-  #
-  #         docker run --rm \
-  #           --platform ${{ matrix.docker_platform }} \
-  #           -v $(pwd):/workspace \
-  #           -v $(pwd)/output:/output \
-  #           -v $(pwd)/build-ws.sh:/build-ws.sh \
-  #           -e ARCH=${{ matrix.arch }} \
-  #           ubuntu:22.04 \
-  #           /bin/bash /build-ws.sh
-  #
-  #     - name: Verify binary
-  #       run: |
-  #         ls -lh output/
-  #         file output/selkies-core-ws-linux-${{ matrix.arch }} || true
-  #
-  #     - name: Upload artifact
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: selkies-core-ws-${{ matrix.arch }}
-  #         path: output/selkies-core-ws-linux-${{ matrix.arch }}
-
   release:
     needs: [build]
     runs-on: ubuntu-latest
@@ -210,13 +119,9 @@ jobs:
         run: |
           mkdir -p release-files
 
-          # Full version (WebRTC + GStreamer)
+          # WebRTC + GStreamer
           cp artifacts/selkies-core-amd64/selkies-core-linux-amd64 release-files/ || true
           # cp artifacts/selkies-core-arm64/selkies-core-linux-arm64 release-files/ || true
-
-          # WebSocket-only version (lighter)
-          # cp artifacts/selkies-core-ws-amd64/selkies-core-ws-linux-amd64 release-files/ || true
-          # cp artifacts/selkies-core-ws-arm64/selkies-core-ws-linux-arm64 release-files/ || true
 
           # Make executable
           chmod +x release-files/* || true
@@ -288,7 +193,7 @@ jobs:
 
             **完整版需要安装：**
             ```bash
-            apt-get install libturbojpeg0 libx11-6 libxcb1 \
+            apt-get install libx11-6 libxcb1 \
               gstreamer1.0-tools gstreamer1.0-plugins-base \
               gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
               gstreamer1.0-plugins-ugly gstreamer1.0-x

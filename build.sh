@@ -38,7 +38,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --mode MODE        Build mode: webrtc (default), websocket, vaapi, nvenc, qsv"
+            echo "  --mode MODE        Build mode: webrtc (default), vaapi, nvenc, qsv"
             echo "  --features FEAT    Additional features (comma-separated)"
             echo "  --release          Build in release mode"
             echo "  --help             Show this help message"
@@ -55,7 +55,28 @@ echo "Build Configuration:"
 echo "  Mode: $BUILD_MODE"
 echo "  Features: ${FEATURES:-none}"
 echo "  Release: $RELEASE"
+if [ -z "$SKIP_WEB_BUILD" ]; then
+    echo "  Frontend: enabled"
+else
+    echo "  Frontend: skipped (SKIP_WEB_BUILD=1)"
+fi
 echo ""
+
+# Build frontend assets unless explicitly skipped
+if [ -z "$SKIP_WEB_BUILD" ]; then
+    if [ -f "web/selkies/package.json" ]; then
+        echo ""
+        echo "Building frontend (web/selkies)..."
+        pushd "web/selkies" >/dev/null
+        npm install
+        npm run build
+        popd >/dev/null
+        echo "Frontend build completed."
+        echo ""
+    else
+        echo -e "${YELLOW}Frontend package.json not found; skipping frontend build.${NC}"
+    fi
+fi
 
 # Build command
 BUILD_CMD="cargo build"
@@ -68,10 +89,6 @@ fi
 case $BUILD_MODE in
     webrtc)
         echo -e "${GREEN}Building with WebRTC support (default)${NC}"
-        ;;
-    websocket)
-        echo -e "${YELLOW}Building WebSocket-only mode${NC}"
-        BUILD_CMD="$BUILD_CMD --no-default-features --features websocket-legacy"
         ;;
     vaapi)
         echo -e "${GREEN}Building with VA-API hardware acceleration${NC}"

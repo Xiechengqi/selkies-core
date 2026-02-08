@@ -3,16 +3,10 @@
 //! This module provides GStreamer-based video pipeline for capturing X11 screens
 //! and encoding to H.264/VP8/VP9 for WebRTC streaming.
 
-#[cfg(feature = "webrtc-streaming")]
 pub mod pipeline;
-
-#[cfg(feature = "webrtc-streaming")]
 pub mod encoder;
-
-#[cfg(feature = "webrtc-streaming")]
 pub mod capture;
 
-#[cfg(feature = "webrtc-streaming")]
 pub use pipeline::{VideoPipeline, PipelineConfig};
 
 
@@ -53,24 +47,12 @@ impl fmt::Display for GstError {
 impl Error for GstError {}
 
 /// Initialize GStreamer subsystem
-#[cfg(feature = "webrtc-streaming")]
 pub fn init() -> Result<(), GstError> {
     gstreamer::init().map_err(|e| GstError::InitFailed(e.to_string()))
 }
 
 /// Check if GStreamer is available and properly initialized
-#[cfg(feature = "webrtc-streaming")]
 #[allow(dead_code)]
 pub fn is_available() -> bool {
     gstreamer::init().is_ok()
-}
-
-#[cfg(not(feature = "webrtc-streaming"))]
-pub fn init() -> Result<(), GstError> {
-    Err(GstError::FeatureDisabled)
-}
-
-#[cfg(not(feature = "webrtc-streaming"))]
-pub fn is_available() -> bool {
-    false
 }

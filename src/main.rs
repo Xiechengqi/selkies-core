@@ -1,39 +1,33 @@
 //! selkies-core - Main entry point
 //!
-//! A high-performance streaming solution for X11 desktops with support for:
-//! - WebRTC + GStreamer (default, low-latency)
-//! - WebSocket + TurboJPEG (legacy, fallback)
+//! A high-performance WebRTC streaming solution for X11 desktops using GStreamer.
 
 mod args;
 mod config;
-mod capture;
-mod encode;
 mod audio;
+mod file_upload;
+mod clipboard;
+mod runtime_settings;
+mod system_clipboard;
 mod transport;
 mod input;
 mod web;
-mod cursor_overlay;
 mod display;
-
-// WebRTC + GStreamer modules (feature-gated)
-#[cfg(feature = "webrtc-streaming")]
 mod gstreamer;
-
-#[cfg(feature = "webrtc-streaming")]
 mod webrtc;
 
 use args::Args;
 use clap::Parser;
 use config::Config;
-use capture::X11Capturer;
-use encode::{Encoder, EncoderConfig};
 use audio::{run_audio_capture, AudioConfig as RuntimeAudioConfig};
 use input::{InputConfig, InputEventData, InputInjector};
 use display::{DisplayManager, DisplayManagerConfig};
 use base64::Engine;
 use image::ImageEncoder;
 use log::{info, error, warn, debug};
+use xxhash_rust::xxh64::xxh64;
 use std::ffi::CString;
+use std::env;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -44,11 +38,7 @@ use x11rb::xcb_ffi::XCBConnection;
 use x11rb::connection::Connection;
 use x11rb::protocol::xfixes::{ConnectionExt as XFixesConnectionExt, CursorNotify, CursorNotifyMask};
 use x11rb::protocol::xproto::{ChangeWindowAttributesAux, ConnectionExt, CreateGCAux, Rectangle};
-
-#[cfg(feature = "webrtc-streaming")]
 use gstreamer::PipelineConfig;
-
-#[cfg(feature = "webrtc-streaming")]
 use webrtc::SessionManager;
 
 #[tokio::main]
@@ -81,11 +71,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.no_auto_x11 {
         config.display.auto_x11 = false;
     }
-    if let Some(backend) = args.x11_backend {
-        config.display.x11_backend = backend;
+    if let Some(ref backend) = args.x11_backend {
+        config.display.x11_backend = backend.clone();
     }
-    if let Some(range_str) = args.x11_display_range {
-        if let Some((start, end)) = parse_display_range(&range_str) {
+    if let Some(ref range_str) = args.x11_display_range {
+        if let Some((start, end)) = parse_display_range(range_str) {
             config.display.x11_display_range = [start, end];
         } else {
             warn!("Invalid display range format: {}, using default", range_str);
@@ -120,14 +110,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.display.display = display_manager.display().to_string();
     info!("Using display: {}", config.display.display);
 
-    if let Some(port) = args.port {
-        info!("Overriding WebSocket port to {}", port);
-        config.websocket.port = port;
-    }
     if let Some(port) = args.http_port {
         info!("Overriding HTTP port to {}", port);
         config.http.port = port;
     }
+
+    apply_basic_auth_overrides(&mut config, &args);
+    apply_input_overrides(&mut config, &args);
+    apply_webrtc_profile(&mut config, &args);
+    apply_webrtc_network_overrides(&mut config, &args);
 
     // Validate configuration
     if let Err(e) = config.validate() {
@@ -135,18 +126,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(e.into());
     }
 
-    // Initialize GStreamer if WebRTC is enabled
-    #[cfg(feature = "webrtc-streaming")]
+    // Initialize GStreamer for WebRTC streaming
     if config.webrtc.enabled {
         info!("Initializing GStreamer for WebRTC streaming...");
         if let Err(e) = gstreamer::init() {
             error!("Failed to initialize GStreamer: {}", e);
-            if cfg!(feature = "websocket-legacy") {
-                warn!("Falling back to WebSocket-only mode");
-                // Continue without WebRTC
-            } else {
-                return Err(e.into());
-            }
+            return Err(e.into());
         } else {
             info!("GStreamer initialized successfully");
             // List available encoders
@@ -161,16 +146,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create input channel and shared state
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<InputEventData>();
     let ui_config = config::ui::UiConfig::from_env(&config);
-    let state = Arc::new(web::SharedState::new(config.clone(), ui_config, input_tx.clone()));
+    let runtime_settings = Arc::new(runtime_settings::RuntimeSettings::new(&config));
+    let state = Arc::new(web::SharedState::new(
+        config.clone(),
+        ui_config,
+        input_tx.clone(),
+        runtime_settings.clone(),
+    ));
     let running = Arc::new(AtomicBool::new(true));
+    let clipboard_running = running.clone();
+    let clipboard_state = state.clone();
+    let mut clipboard_handle = task::spawn_blocking(move || {
+        let mut last_seen_hash: Option<u64> = None;
+        while clipboard_running.load(Ordering::Relaxed) {
+            let binary_enabled = clipboard_state.runtime_settings.binary_clipboard_enabled();
+            if binary_enabled {
+                if let Some((mime, data)) = system_clipboard::read_binary() {
+                    let mut hash = xxh64(mime.as_bytes(), 0);
+                    hash = xxh64(&data, hash);
+                    let last_written = clipboard_state.last_clipboard_hash();
+                    if last_seen_hash != Some(hash) && last_written != Some(hash) {
+                        clipboard_state.set_clipboard_binary(mime, data);
+                        last_seen_hash = Some(hash);
+                    }
+                } else if let Some(text) = system_clipboard::read_text() {
+                    let data = text.into_bytes();
+                    let hash = xxh64(&data, 0);
+                    let last_written = clipboard_state.last_clipboard_hash();
+                    if last_seen_hash != Some(hash) && last_written != Some(hash) {
+                        let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+                        clipboard_state.set_clipboard(encoded);
+                        last_seen_hash = Some(hash);
+                    }
+                }
+            } else if let Some(text) = system_clipboard::read_text() {
+                let data = text.into_bytes();
+                let hash = xxh64(&data, 0);
+                let last_written = clipboard_state.last_clipboard_hash();
+                if last_seen_hash != Some(hash) && last_written != Some(hash) {
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+                    clipboard_state.set_clipboard(encoded);
+                    last_seen_hash = Some(hash);
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(1000));
+        }
+    });
 
     // Create WebRTC session manager if enabled
-    #[cfg(feature = "webrtc-streaming")]
     let session_manager = if config.webrtc.enabled {
         info!("Creating WebRTC session manager...");
         let manager = Arc::new(SessionManager::new(
             config.webrtc.clone(),
             input_tx.clone(),
+            file_upload::FileUploadSettings::from_config(&config),
+            runtime_settings.clone(),
+            state.clone(),
             10, // max 10 concurrent sessions
         ));
         info!("WebRTC session manager created");
@@ -179,30 +211,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    #[cfg(not(feature = "webrtc-streaming"))]
-    let session_manager: Option<Arc<()>> = None;
-
-    // Start WebSocket server (if enabled)
-    let mut server_handle = if config.websocket.enabled {
-        info!("Starting WebSocket streaming server on {}:{}...", config.websocket.host, config.websocket.port);
-        let ws_server = transport::WebSocketServer::new(
-            config.websocket.host.clone(),
-            config.websocket.port,
-            state.clone(),
-        );
-
-        Some(task::spawn(async move {
-            if let Err(e) = ws_server.run().await {
-                error!("WebSocket server error: {}", e);
-            }
-        }))
-    } else {
-        info!("WebSocket streaming server disabled (WebRTC mode)");
-        None
-    };
-
     // Start GStreamer pipeline for WebRTC (if enabled)
-    #[cfg(feature = "webrtc-streaming")]
     let gst_handle = if config.webrtc.enabled && session_manager.is_some() {
         let gst_state = state.clone();
         let gst_running = running.clone();
@@ -229,14 +238,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err(format!("Pipeline start failed: {}", e));
             }
 
+            let mut current_bitrate = gst_state.runtime_settings.video_bitrate_kbps();
+            let mut current_keyframe = gst_state.runtime_settings.keyframe_interval();
+            pipeline.set_bitrate(current_bitrate);
+            pipeline.set_keyframe_interval(current_keyframe);
             info!("GStreamer pipeline started, streaming RTP packets...");
             let mut packet_count = 0u64;
 
             while gst_running.load(Ordering::Relaxed) {
                 // Check for keyframe request
-                if gst_state.take_keyframe_request() {
+                if gst_state.take_keyframe_request() || gst_state.runtime_settings.take_keyframe_request() {
                     pipeline.request_keyframe();
                     debug!("Keyframe requested");
+                }
+
+                let desired_bitrate = gst_state.runtime_settings.video_bitrate_kbps();
+                if desired_bitrate != current_bitrate {
+                    current_bitrate = desired_bitrate;
+                    pipeline.set_bitrate(current_bitrate);
+                }
+                let desired_keyframe = gst_state.runtime_settings.keyframe_interval();
+                if desired_keyframe != current_keyframe {
+                    current_keyframe = desired_keyframe;
+                    pipeline.set_keyframe_interval(current_keyframe);
                 }
 
                 // Pull RTP packet from pipeline
@@ -267,120 +291,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-
-    #[cfg(not(feature = "webrtc-streaming"))]
-    let gst_handle: Option<tokio::task::JoinHandle<Result<(), String>>> = None;
-
-    // Start capture and encoding loop (for WebSocket/legacy mode)
-    let capture_state = state.clone();
-    let display = config.display.display.clone();
-    let target_fps = config.encoding.target_fps.max(1);
-    let encoder_config = EncoderConfig {
-        quality: config.encoding.jpeg_quality,
-        stripe_height: config.encoding.stripe_height,
-        subsample: 1,
-    };
-    let capture_running = running.clone();
-    let cursor_hidden = Arc::new(AtomicBool::new(false));
-    let cursor_hidden_capture = Arc::clone(&cursor_hidden);
-    let capture_display_label = config.display.display.clone();
-    let mut capture_handle = task::spawn_blocking(move || {
-        let frame_interval = Duration::from_millis(1000 / target_fps as u64);
-        while capture_running.load(Ordering::Relaxed) {
-            let display_cstr = match CString::new(display.as_str()) {
-                Ok(value) => value,
-                Err(e) => {
-                    error!("Invalid display string: {}", e);
-                    std::thread::sleep(Duration::from_secs(2));
-                    continue;
-                }
-            };
-            let (conn, screen_num) = match XCBConnection::connect(Some(display_cstr.as_c_str())) {
-                Ok(result) => result,
-                Err(e) => {
-                    error!("X11 connection failed: {}", e);
-                    std::thread::sleep(Duration::from_secs(2));
-                    continue;
-                }
-            };
-            let conn = Arc::new(conn);
-            let screen_num = screen_num as i32;
-            let screen = &conn.setup().roots[screen_num as usize];
-            let root_window = screen.root;
-            if !cursor_hidden_capture.load(Ordering::Relaxed) {
-                if hide_cursor(conn.as_ref(), root_window) {
-                    cursor_hidden_capture.store(true, Ordering::Relaxed);
-                    info!("Cursor hidden on display {}", capture_display_label);
-                }
-            }
-
-            let mut capturer = match X11Capturer::new(conn.clone(), screen_num) {
-                Ok(value) => value,
-                Err(e) => {
-                    error!("Capturer init failed: {}", e);
-                    std::thread::sleep(Duration::from_secs(2));
-                    continue;
-                }
-            };
-            let (cap_width, cap_height) = capturer.dimensions();
-            info!("Capturer initialized: {}x{}", cap_width, cap_height);
-            capture_state.set_display_size(cap_width, cap_height);
-            let mut encoder = match Encoder::new(encoder_config.clone()) {
-                Ok(value) => value,
-                Err(e) => {
-                    error!("Encoder init failed: {}", e);
-                    std::thread::sleep(Duration::from_secs(2));
-                    continue;
-                }
-            };
-
-            let mut last_frame_ts: Option<std::time::Instant> = None;
-            while capture_running.load(Ordering::Relaxed) {
-                if capture_state.take_refresh_request() {
-                    encoder.force_refresh();
-                }
-                let frame_start = std::time::Instant::now();
-
-                match capturer.capture() {
-                    Ok(frame) => {
-                        match encoder.encode_frame(&frame) {
-                            Ok(mut stripes) => {
-                                if frame.is_dirty && !stripes.is_empty() {
-                                    let frame_id = (frame.sequence & 0xFFFF) as u16;
-                                    for stripe in stripes.iter_mut() {
-                                        stripe.frame_id = frame_id;
-                                    }
-                                    if frame.sequence % 30 == 0 {
-                                        debug!("Sending frame {} with {} stripes", frame_id, stripes.len());
-                                    }
-                                    let _ = capture_state.frame_sender.send(stripes);
-                                }
-                                let fps = match last_frame_ts.replace(frame.timestamp) {
-                                    Some(prev) => {
-                                        let dt = frame.timestamp.duration_since(prev).as_secs_f64();
-                                        if dt > 0.0 { 1.0 / dt } else { target_fps as f64 }
-                                    }
-                                    None => target_fps as f64,
-                                };
-                                capture_state.update_capture_stats(frame.data.len(), fps);
-                            }
-                            Err(e) => error!("Encode error: {}", e),
-                        }
-                    }
-                    Err(e) => {
-                        error!("Capture error: {}", e);
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                }
-
-                let elapsed = frame_start.elapsed();
-                if elapsed < frame_interval {
-                    std::thread::sleep(frame_interval - elapsed);
-                }
-            }
-        }
-        Ok::<(), String>(())
-    });
 
     // Start input injection loop
     let input_display = config.display.display.clone();
@@ -441,15 +351,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start audio streaming loop
     let audio_running = running.clone();
     let audio_sender = state.audio_sender.clone();
-    let audio_config = RuntimeAudioConfig {
+    let base_audio_config = RuntimeAudioConfig {
         sample_rate: config.audio.sample_rate,
         channels: config.audio.channels,
         bitrate: config.audio.bitrate,
     };
+    let audio_state = state.clone();
     let mut audio_handle = if config.audio.enabled {
         Some(task::spawn_blocking(move || {
-            if let Err(e) = run_audio_capture(audio_config, audio_sender, audio_running) {
-                error!("Audio capture error: {}", e);
+            let mut current_bitrate = base_audio_config.bitrate;
+            let mut config = base_audio_config.clone();
+            let audio_active = Arc::new(AtomicBool::new(true));
+            loop {
+                if !audio_running.load(Ordering::Relaxed) {
+                    break;
+                }
+                if let Some(new_bitrate) = audio_state.runtime_settings.take_audio_bitrate_update() {
+                    current_bitrate = new_bitrate;
+                    config = config.with_bitrate(new_bitrate);
+                    info!("Restarting audio capture with bitrate {}", new_bitrate);
+                }
+
+                audio_active.store(true, Ordering::Relaxed);
+                let monitor_running = audio_running.clone();
+                let monitor_active = audio_active.clone();
+                let monitor_settings = audio_state.runtime_settings.clone();
+                let monitor = std::thread::spawn(move || {
+                    while monitor_running.load(Ordering::Relaxed) {
+                        if monitor_settings.audio_bitrate_dirty() {
+                            monitor_active.store(false, Ordering::Relaxed);
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                });
+
+                if let Err(e) = run_audio_capture(config.clone(), audio_sender.clone(), audio_active.clone()) {
+                    error!("Audio capture error: {}", e);
+                }
+                let _ = monitor.join();
+                if audio_state.runtime_settings.take_audio_bitrate_update().is_some() {
+                    continue;
+                }
+                break;
             }
         }))
     } else {
@@ -457,6 +401,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Start cursor tracking loop
+    let cursor_hidden = Arc::new(AtomicBool::new(false));
     let cursor_running = running.clone();
     let cursor_state = state.clone();
     let cursor_display = config.display.display.clone();
@@ -638,7 +583,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
 
     // Start WebRTC session cleanup task (if enabled)
-    #[cfg(feature = "webrtc-streaming")]
     let cleanup_handle = if let Some(ref manager) = session_manager {
         let cleanup_running = running.clone();
         let cleanup_manager = manager.clone();
@@ -656,9 +600,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-
-    #[cfg(not(feature = "webrtc-streaming"))]
-    let cleanup_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     // Start stats sampling loop (CPU/memory)
     let stats_running = running.clone();
@@ -700,15 +641,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Start HTTP server with WebRTC signaling support
-    #[cfg(feature = "webrtc-streaming")]
     let http_server = web::run_http_server_with_webrtc(
         config.http.port,
         state.clone(),
         session_manager.clone(),
     );
-
-    #[cfg(not(feature = "webrtc-streaming"))]
-    let http_server = web::run_http_server(config.http.port, state.clone());
 
     let mut http_handle = task::spawn(async move {
         if let Err(e) = http_server.await {
@@ -722,33 +659,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Shutdown signal received");
     };
 
-    // Build select branches based on what's enabled
-    #[cfg(feature = "webrtc-streaming")]
-    let _has_gst = gst_handle.is_some();
-    #[cfg(not(feature = "webrtc-streaming"))]
-    let has_gst = false;
-
-    #[cfg(feature = "webrtc-streaming")]
-    let _has_cleanup = cleanup_handle.is_some();
-    #[cfg(not(feature = "webrtc-streaming"))]
-    let has_cleanup = false;
-
     if let Some(handle) = audio_handle.as_mut() {
         tokio::select! {
             _ = shutdown => {
                 info!("Initiating graceful shutdown...");
-            }
-            result = async { server_handle.as_mut().unwrap().await }, if server_handle.is_some() => {
-                log_async_task_result("WebSocket server", result);
-            }
-            result = &mut capture_handle => {
-                log_blocking_task_result("Capture loop", result);
             }
             result = &mut input_handle => {
                 log_blocking_task_result("Input loop", result);
             }
             result = &mut stats_handle => {
                 log_blocking_task_result("Stats loop", result);
+            }
+            result = &mut clipboard_handle => {
+                log_async_task_result("Clipboard loop", result);
             }
             result = &mut http_handle => {
                 log_async_task_result("HTTP server", result);
@@ -762,17 +685,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ = shutdown => {
                 info!("Initiating graceful shutdown...");
             }
-            result = async { server_handle.as_mut().unwrap().await }, if server_handle.is_some() => {
-                log_async_task_result("WebSocket server", result);
-            }
-            result = &mut capture_handle => {
-                log_blocking_task_result("Capture loop", result);
-            }
             result = &mut input_handle => {
                 log_blocking_task_result("Input loop", result);
             }
             result = &mut stats_handle => {
                 log_blocking_task_result("Stats loop", result);
+            }
+            result = &mut clipboard_handle => {
+                log_async_task_result("Clipboard loop", result);
             }
             result = &mut http_handle => {
                 log_async_task_result("HTTP server", result);
@@ -785,14 +705,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Stopping all tasks...");
 
-    // Stop WebSocket server
-    if let Some(handle) = server_handle {
-        if !handle.is_finished() {
-            handle.abort();
-            let _ = handle.await;
-        }
-    }
-
     // Stop HTTP server
     if !http_handle.is_finished() {
         http_handle.abort();
@@ -800,7 +712,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Stop GStreamer pipeline
-    #[cfg(feature = "webrtc-streaming")]
     if let Some(handle) = gst_handle {
         if !handle.is_finished() {
             info!("Stopping GStreamer pipeline...");
@@ -810,7 +721,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Stop WebRTC cleanup task
-    #[cfg(feature = "webrtc-streaming")]
     if let Some(handle) = cleanup_handle {
         if !handle.is_finished() {
             handle.abort();
@@ -832,10 +742,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = stats_handle.await;
     }
 
-    // Stop capture loop
-    if !capture_handle.is_finished() {
-        capture_handle.abort();
-        let _ = capture_handle.await;
+    // Stop clipboard loop
+    if !clipboard_handle.is_finished() {
+        clipboard_handle.abort();
+        let _ = clipboard_handle.await;
     }
 
     // Stop input loop
@@ -1037,6 +947,224 @@ fn encode_cursor_png(reply: &x11rb::protocol::xfixes::GetCursorImageReply) -> Op
     } else {
         None
     }
+}
+
+fn apply_basic_auth_overrides(config: &mut Config, args: &Args) {
+    let env_enabled = env_bool("SELKIES_BASIC_AUTH_ENABLED");
+    let env_user = env_var("SELKIES_BASIC_AUTH_USER");
+    let env_password = env_var("SELKIES_BASIC_AUTH_PASSWORD");
+
+    if let Some(enabled) = args.basic_auth_enabled.or(env_enabled) {
+        config.http.basic_auth_enabled = enabled;
+    }
+    if let Some(user) = args.basic_auth_user.clone().or(env_user) {
+        config.http.basic_auth_user = user;
+    }
+    if let Some(password) = args.basic_auth_password.clone().or(env_password) {
+        config.http.basic_auth_password = password;
+    }
+
+    if config.http.basic_auth_user.is_empty() {
+        config.http.basic_auth_user = env::var("USER").unwrap_or_else(|_| "user".to_string());
+    }
+}
+
+fn apply_input_overrides(config: &mut Config, args: &Args) {
+    let env_binary_clipboard = env_bool("SELKIES_BINARY_CLIPBOARD_ENABLED");
+    let env_commands = env_bool("SELKIES_COMMANDS_ENABLED");
+    let env_transfers = env_var("SELKIES_FILE_TRANSFERS");
+    let env_upload_dir = env_var("SELKIES_UPLOAD_DIR");
+
+    if let Some(enabled) = args.binary_clipboard_enabled.or(env_binary_clipboard) {
+        config.input.enable_binary_clipboard = enabled;
+    }
+    if let Some(enabled) = args.commands_enabled.or(env_commands) {
+        config.input.enable_commands = enabled;
+    }
+    if let Some(list_str) = args.file_transfers.clone().or(env_transfers) {
+        config.input.file_transfers = parse_csv_list(&list_str);
+    }
+    if let Some(upload_dir) = args.upload_dir.clone().or(env_upload_dir) {
+        config.input.upload_dir = upload_dir;
+    }
+}
+
+fn env_var(key: &str) -> Option<String> {
+    match env::var(key) {
+        Ok(value) if !value.is_empty() => Some(value),
+        _ => None,
+    }
+}
+
+fn env_bool(key: &str) -> Option<bool> {
+    let raw = env::var(key).ok()?;
+    match raw.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "y" => Some(true),
+        "false" | "0" | "no" | "n" => Some(false),
+        _ => None,
+    }
+}
+
+fn apply_webrtc_network_overrides(config: &mut Config, args: &Args) {
+    let env_profile = env_var("SELKIES_WEBRTC_PROFILE");
+    let env_trickle = env_bool("SELKIES_WEBRTC_ICE_TRICKLE");
+    let env_nat1to1 = env_var("SELKIES_WEBRTC_NAT1TO1");
+    let env_ip_url = env_var("SELKIES_WEBRTC_IP_RETRIEVAL_URL");
+    let env_epr = env_var("SELKIES_WEBRTC_EPR");
+    let env_udp_mux = env_var("SELKIES_WEBRTC_UDP_MUX_PORT");
+    let env_tcp_mux = env_var("SELKIES_WEBRTC_TCP_MUX_PORT");
+    let env_stun_host = env_var("SELKIES_WEBRTC_STUN_HOST");
+    let env_stun_port = env_var("SELKIES_WEBRTC_STUN_PORT");
+    let env_turn_host = env_var("SELKIES_WEBRTC_TURN_HOST");
+    let env_turn_port = env_var("SELKIES_WEBRTC_TURN_PORT");
+    let env_turn_protocol = env_var("SELKIES_WEBRTC_TURN_PROTOCOL");
+    let env_turn_tls = env_bool("SELKIES_WEBRTC_TURN_TLS");
+    let env_turn_shared_secret = env_var("SELKIES_WEBRTC_TURN_SHARED_SECRET");
+    let env_turn_username = env_var("SELKIES_WEBRTC_TURN_USERNAME");
+    let env_turn_password = env_var("SELKIES_WEBRTC_TURN_PASSWORD");
+
+    if let Some(profile) = args.webrtc_profile.clone().or(env_profile) {
+        config.webrtc.network_profile = Some(profile);
+    }
+
+    if let Some(trickle) = args.webrtc_ice_trickle.or(env_trickle) {
+        config.webrtc.ice_trickle = trickle;
+    }
+
+    if let Some(list_str) = args.webrtc_nat1to1.clone().or(env_nat1to1) {
+        config.webrtc.nat1to1_ips = parse_csv_list(&list_str);
+    }
+
+    if let Some(url) = args.webrtc_ip_retrieval_url.clone().or(env_ip_url) {
+        config.webrtc.ip_retrieval_url = url;
+    }
+
+    if let Some(range_str) = args.webrtc_ephemeral_udp_port_range.clone().or(env_epr) {
+        let parsed = parse_port_range(&range_str);
+        if parsed.is_none() {
+            warn!("Invalid WebRTC ephemeral UDP port range: {}", range_str);
+        }
+        config.webrtc.ephemeral_udp_port_range = parsed;
+    }
+
+    if let Some(port) = args.webrtc_udp_mux_port.or(parse_u16(&env_udp_mux)) {
+        config.webrtc.udp_mux_port = port;
+    }
+
+    if let Some(port) = args.webrtc_tcp_mux_port.or(parse_u16(&env_tcp_mux)) {
+        config.webrtc.tcp_mux_port = port;
+    }
+
+    if let Some(host) = args.webrtc_stun_host.clone().or(env_stun_host) {
+        config.webrtc.stun_host = host;
+    }
+    if let Some(port) = args.webrtc_stun_port.or(parse_u16(&env_stun_port)) {
+        config.webrtc.stun_port = port;
+    }
+    if let Some(host) = args.webrtc_turn_host.clone().or(env_turn_host) {
+        config.webrtc.turn_host = host;
+    }
+    if let Some(port) = args.webrtc_turn_port.or(parse_u16(&env_turn_port)) {
+        config.webrtc.turn_port = port;
+    }
+    if let Some(protocol) = args.webrtc_turn_protocol.clone().or(env_turn_protocol) {
+        config.webrtc.turn_protocol = protocol;
+    }
+    if let Some(tls) = args.webrtc_turn_tls.or(env_turn_tls) {
+        config.webrtc.turn_tls = tls;
+    }
+    if let Some(secret) = args.webrtc_turn_shared_secret.clone().or(env_turn_shared_secret) {
+        config.webrtc.turn_shared_secret = secret;
+    }
+    if let Some(user) = args.webrtc_turn_username.clone().or(env_turn_username) {
+        config.webrtc.turn_username = user;
+    }
+    if let Some(password) = args.webrtc_turn_password.clone().or(env_turn_password) {
+        config.webrtc.turn_password = password;
+    }
+}
+
+fn apply_webrtc_profile(config: &mut Config, args: &Args) {
+    let env_profile = env_var("SELKIES_WEBRTC_PROFILE");
+    let profile = args
+        .webrtc_profile
+        .clone()
+        .or(env_profile)
+        .or_else(|| config.webrtc.network_profile.clone());
+
+    let profile = match profile {
+        Some(p) => p.to_ascii_lowercase(),
+        None => return,
+    };
+
+    match profile.as_str() {
+        "lan" => {
+            config.webrtc.ice_trickle = true;
+            config.webrtc.nat1to1_ips.clear();
+            config.webrtc.ip_retrieval_url.clear();
+            config.webrtc.ephemeral_udp_port_range = None;
+            config.webrtc.udp_mux_port = 0;
+            config.webrtc.tcp_mux_port = 0;
+        }
+        "wan" => {
+            config.webrtc.ice_trickle = true;
+            if config.webrtc.ice_servers.is_empty() {
+                config.webrtc.ice_servers = vec![crate::config::IceServerConfig::default()];
+            }
+            if config.webrtc.ephemeral_udp_port_range.is_none() {
+                config.webrtc.ephemeral_udp_port_range = Some([59000, 59100]);
+            }
+            if config.webrtc.ip_retrieval_url.is_empty() {
+                config.webrtc.ip_retrieval_url = "https://checkip.amazonaws.com".to_string();
+            }
+            if config.webrtc.stun_host.is_empty() {
+                config.webrtc.stun_host = "stun.l.google.com".to_string();
+            }
+            if config.webrtc.stun_port == 0 {
+                config.webrtc.stun_port = 19302;
+            }
+        }
+        _ => {
+            warn!("Unknown WebRTC profile: {} (expected \"lan\" or \"wan\")", profile);
+        }
+    }
+
+    config.webrtc.network_profile = Some(profile);
+}
+
+fn parse_csv_list(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+        return Vec::new();
+    }
+
+    trimmed
+        .split(',')
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .map(|item| item.to_string())
+        .collect()
+}
+
+fn parse_u16(value: &Option<String>) -> Option<u16> {
+    value.as_ref()?.trim().parse::<u16>().ok()
+}
+
+fn parse_port_range(value: &str) -> Option<[u16; 2]> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = trimmed.split('-').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let start = parts[0].trim().parse::<u16>().ok()?;
+    let end = parts[1].trim().parse::<u16>().ok()?;
+    if start == 0 || end == 0 || start > end {
+        return None;
+    }
+    Some([start, end])
 }
 
 /// Parse display range string (e.g., "99-199") into [start, end]

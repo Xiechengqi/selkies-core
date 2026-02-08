@@ -12,7 +12,7 @@ Before interacting with the client via `postMessage`, it must first connect to t
 This is the primary mode when connecting to a server running in its secure configuration. The client's role and capabilities are determined by a temporary token provided as a URL query parameter.
 
 *   **URL Format:** `https://<server>/?token=<ACCESS_TOKEN>`
-*   **Behavior:** The token is sent to the server during the WebSocket handshake. If valid, the server responds with the client's assigned role (e.g., `controller`, `viewer`) and properties (e.g., a gamepad `slot`). This mode takes precedence over the legacy hash mode.
+*   **Behavior:** The token is sent to the server during the WebSocket handshake. If valid, the server responds with the client's assigned role (e.g., `controller`, `viewer`) and properties (e.g., an assigned `slot`). This mode takes precedence over the legacy hash mode.
 
 ### 2. Legacy Hash Mode
 *   **URL Format:** `https://<server>/#<mode>` (e.g., `/#shared`, `/#player2`)
@@ -110,13 +110,6 @@ All messages sent to the client should be JavaScript objects with a `type` prope
 
 ---
 
-**Type:** `gamepadControl`
-
-*   **Payload:** `{ type: 'gamepadControl', enabled: <boolean> }`
-*   **Description:** Enables or disables the client's gamepad input processing and forwarding. Updates internal state `isGamepadEnabled` and calls `enable()` or `disable()` on the `GamepadManager`.
-
----
-
 **Type:** `requestFullscreen`
 
 *   **Payload:** `{ type: 'requestFullscreen' }`
@@ -158,16 +151,15 @@ The client exposes certain state information and statistics directly through glo
 *   `isVideoPipelineActive`: (Boolean) Client's belief about whether the video pipeline (receiving/decoding/rendering) is active. Globally accessible.
 *   `isAudioPipelineActive`: (Boolean) Client's belief about whether the audio pipeline (receiving/decoding/playback) is active. Globally accessible.
 *   `isMicrophoneActive`: (Boolean) Whether the client is currently capturing microphone audio. Globally accessible.
-*   `isGamepadEnabled`: (Boolean) Whether gamepad input processing is enabled. Globally accessible.
 
 ### Messages Sent from Client to Dashboard:
 
 *   **Type:** `pipelineStatusUpdate`
-    *   **Payload:** `{ type: 'pipelineStatusUpdate', video?: <boolean>, audio?: <boolean>, microphone?: <boolean>, gamepad?: <boolean> }`
+*   **Payload:** `{ type: 'pipelineStatusUpdate', video?: <boolean>, audio?: <boolean>, microphone?: <boolean> }`
     *   **Description:** Sent when the client's internal state for pipelines changes (e.g., after receiving confirmation from the server in WebSocket mode, or toggling locally). Used to keep the dashboard UI (like toggle buttons) in sync.
 
 *   **Type:** `sidebarButtonStatusUpdate`
-    *   **Payload:** `{ type: 'sidebarButtonStatusUpdate', video: <boolean>, audio: <boolean>, microphone: <boolean>, gamepad: <boolean> }`
+*   **Payload:** `{ type: 'sidebarButtonStatusUpdate', video: <boolean>, audio: <boolean>, microphone: <boolean> }`
     *   **Description:** Sent *by* the client *to itself* after a state change to trigger UI updates.
 
 *   **Type:** `clipboardContentUpdate`
@@ -183,33 +175,28 @@ The client exposes certain state information and statistics directly through glo
         *   `'end'`: `{ status: 'end', fileName: <string>, fileSize: <number> }`
         *   `'error'`: `{ status: 'error', fileName: <string>, message: <string> }`
 
-*   **Type:** `gamepadButtonUpdate` / `gamepadAxisUpdate`
-    *   **Payload:** `{ type: 'gamepadButtonUpdate', gamepadIndex: <number>, buttonIndex: <number>, value: <number> }` or `{ type: 'gamepadAxisUpdate', gamepadIndex: <number>, axisIndex: <number>, value: <number> }`
-    *   **Description:** Sent *by* the client *to itself* when gamepad input is detected.
-
 ## 3. Replicating UI Interactions
 
 An external dashboard needs to implement the following:
 
 1.  **Settings Controls:** Use the `settings` message type to send changes for bitrate, framerate, encoder, etc.
 2.  **Pipeline Toggles:** Use the `pipelineControl` message to toggle Video, Audio (WebSocket only), and Microphone pipelines. Listen for `pipelineStatusUpdate` to update the button states.
-3.  **Gamepad Toggle & Visualization:** Use `gamepadControl` to toggle gamepad input. Listen for `gamepadButtonUpdate` and `gamepadAxisUpdate` messages to update a custom gamepad visualizer.
-4.  **Resolution Control:**
+3.  **Resolution Control:**
     *   Implement inputs/dropdowns for manual width/height.
     *   Send `setManualResolution` on apply.
     *   Implement a checkbox for "Scale Locally" and send `setScaleLocally`.
     *   Implement a "Reset" button sending `resetResolutionToWindow`.
-5.  **Fullscreen:** Implement a button sending the `requestFullscreen` message.
-6.  **Stats Display:** Periodically or on demand, directly read the relevant global variables from the client's `window` object (e.g., `window.fps`, `window.currentAudioBufferSize`, `videoFrameBuffer.length`, `connectionStat`, `gpuStat`, `cpuStat`) and display the information.
-7.  **Server Clipboard:**
+4.  **Fullscreen:** Implement a button sending the `requestFullscreen` message.
+5.  **Stats Display:** Periodically or on demand, directly read the relevant global variables from the client's `window` object (e.g., `window.fps`, `window.currentAudioBufferSize`, `videoFrameBuffer.length`, `connectionStat`, `gpuStat`, `cpuStat`) and display the information.
+6.  **Server Clipboard:**
     *   Display clipboard content received via the `clipboardContentUpdate` message.
     *   Allow editing and send changes back using the `clipboardUpdateFromUI` message.
-8.  **File Upload:**
+7.  **File Upload:**
     *   Implement a file input button. When clicked, dispatch a `CustomEvent('requestFileUpload')` on the client's `window` object (`window.dispatchEvent(new CustomEvent('requestFileUpload'))`). This triggers the client's hidden file input.
     *   *(Alternative/DragDrop)*: Implement drag-and-drop handling. The client overlay already handles this, sending files via WebSocket. Replicating this fully externally might be complex, but triggering the file input is the standard sidebar approach.
     *   Listen for `fileUpload` messages to display upload progress and status.
-9.  **Virtual Keyboard:** Implement a button sending the `showVirtualKeyboard` message for environments needing the OSK.
-10. **Audio Device Selection:**
+8.  **Virtual Keyboard:** Implement a button sending the `showVirtualKeyboard` message for environments needing the OSK.
+9.  **Audio Device Selection:**
     *   Query `navigator.mediaDevices.enumerateDevices()` (requires user permission first, often obtained via a temporary `getUserMedia({audio: true})` call).
     *   Populate dropdowns for audio input and output devices.
     *   On selection change, send the `audioDeviceSelected` message with the appropriate `context` ('input' or 'output') and `deviceId`.

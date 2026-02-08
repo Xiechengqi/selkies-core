@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::time::Duration;
 
 pub mod ui;
 
@@ -81,9 +80,6 @@ pub struct Config {
     /// Display configuration
     pub display: DisplayConfig,
 
-    /// WebSocket configuration
-    pub websocket: WebSocketConfig,
-
     /// HTTP configuration
     pub http: HttpConfig,
 
@@ -100,7 +96,7 @@ pub struct Config {
     /// Logging configuration
     pub logging: LoggingConfig,
 
-    /// WebRTC configuration (optional, defaults to enabled)
+    /// WebRTC configuration
     #[serde(default)]
     pub webrtc: WebRTCConfig,
 }
@@ -159,29 +155,6 @@ pub struct DisplayConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebSocketConfig {
-    /// Enable WebSocket streaming server (legacy mode)
-    /// Default: false when webrtc-streaming feature is enabled, true otherwise
-    #[serde(default = "default_websocket_enabled")]
-    pub enabled: bool,
-
-    /// Bind host
-    pub host: String,
-
-    /// WebSocket port
-    pub port: u16,
-
-    /// Maximum connections
-    pub max_connections: u32,
-
-    /// Connection timeout
-    pub connection_timeout: Duration,
-
-    /// Enable per-message deflate
-    pub compression: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpConfig {
     /// HTTP bind address
     pub host: String,
@@ -191,30 +164,27 @@ pub struct HttpConfig {
 
     /// CORS origin
     pub cors_origin: Option<String>,
+
+    /// Enable HTTP basic authentication
+    #[serde(default = "default_basic_auth_enabled")]
+    pub basic_auth_enabled: bool,
+
+    /// Basic auth username
+    #[serde(default = "default_basic_auth_user")]
+    pub basic_auth_user: String,
+
+    /// Basic auth password
+    #[serde(default = "default_basic_auth_password")]
+    pub basic_auth_password: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncodingConfig {
-    /// JPEG quality (1-100)
-    pub jpeg_quality: u8,
-
-    /// Stripe height in pixels (must be power of 2)
-    pub stripe_height: u32,
-
     /// Target FPS
     pub target_fps: u32,
 
     /// Maximum FPS
     pub max_fps: u32,
-
-    /// Keyframe interval (in frames)
-    pub keyframe_interval: u32,
-
-    /// Bandwidth limit in bytes/sec (0 = unlimited)
-    pub bandwidth_limit: u64,
-
-    /// Enable adaptive quality
-    pub adaptive_quality: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,6 +197,23 @@ pub struct InputConfig {
 
     /// Enable clipboard sync
     pub enable_clipboard: bool,
+
+    /// Enable binary clipboard sync
+    #[serde(default)]
+    pub enable_binary_clipboard: bool,
+
+    /// Enable command execution from client messages
+    #[serde(default)]
+    pub enable_commands: bool,
+
+
+    /// Allowed file transfer directions ("upload", "download")
+    #[serde(default = "default_file_transfers")]
+    pub file_transfers: Vec<String>,
+
+    /// Directory to store uploaded files
+    #[serde(default = "default_upload_dir")]
+    pub upload_dir: String,
 
     /// Mouse sensitivity multiplier
     pub mouse_sensitivity: f64,
@@ -278,9 +265,53 @@ pub struct WebRTCConfig {
     /// Enable WebRTC streaming (if false, falls back to WebSocket mode)
     pub enabled: bool,
 
+    /// Optional network profile ("lan" or "wan")
+    #[serde(default)]
+    pub network_profile: Option<String>,
+
+    /// Enable Trickle ICE (send candidates as they are found)
+    #[serde(default = "default_ice_trickle")]
+    pub ice_trickle: bool,
+
     /// ICE servers for NAT traversal
     #[serde(default)]
     pub ice_servers: Vec<IceServerConfig>,
+
+    /// STUN host for NAT traversal (optional)
+    #[serde(default)]
+    pub stun_host: String,
+
+    /// STUN port for NAT traversal (optional)
+    #[serde(default)]
+    pub stun_port: u16,
+
+    /// TURN host for relay (optional)
+    #[serde(default)]
+    pub turn_host: String,
+
+    /// TURN port for relay (optional)
+    #[serde(default)]
+    pub turn_port: u16,
+
+    /// TURN transport protocol: "udp" or "tcp"
+    #[serde(default = "default_turn_protocol")]
+    pub turn_protocol: String,
+
+    /// Enable TURN over TLS/DTLS
+    #[serde(default)]
+    pub turn_tls: bool,
+
+    /// TURN shared secret for HMAC credentials (optional)
+    #[serde(default)]
+    pub turn_shared_secret: String,
+
+    /// TURN username for legacy auth (optional)
+    #[serde(default)]
+    pub turn_username: String,
+
+    /// TURN password for legacy auth (optional)
+    #[serde(default)]
+    pub turn_password: String,
 
     /// Video codec selection
     #[serde(default)]
@@ -319,13 +350,44 @@ pub struct WebRTCConfig {
 
     /// Keyframe interval in frames
     pub keyframe_interval: u32,
+
+    /// NAT 1:1 external IP mappings (optional)
+    #[serde(default)]
+    pub nat1to1_ips: Vec<String>,
+
+    /// URL used to fetch external IP when NAT mappings are not provided
+    #[serde(default)]
+    pub ip_retrieval_url: String,
+
+    /// Ephemeral UDP port range for ICE (optional)
+    #[serde(default)]
+    pub ephemeral_udp_port_range: Option<[u16; 2]>,
+
+    /// Single UDP mux port for all peers (0 to disable)
+    #[serde(default)]
+    pub udp_mux_port: u16,
+
+    /// Single TCP mux port for all peers (0 to disable)
+    #[serde(default)]
+    pub tcp_mux_port: u16,
 }
 
 impl Default for WebRTCConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            network_profile: None,
+            ice_trickle: true,
             ice_servers: vec![IceServerConfig::default()],
+            stun_host: "stun.l.google.com".to_string(),
+            stun_port: 19302,
+            turn_host: String::new(),
+            turn_port: 3478,
+            turn_protocol: "udp".to_string(),
+            turn_tls: false,
+            turn_shared_secret: String::new(),
+            turn_username: String::new(),
+            turn_password: String::new(),
             video_codec: VideoCodec::H264,
             video_bitrate: 4000,       // 4 Mbps default
             video_bitrate_max: 8000,   // 8 Mbps max
@@ -338,6 +400,11 @@ impl Default for WebRTCConfig {
             rtx_enabled: true,
             pipeline_latency_ms: 50,
             keyframe_interval: 60,
+            nat1to1_ips: Vec::new(),
+            ip_retrieval_url: String::new(),
+            ephemeral_udp_port_range: None,
+            udp_mux_port: 0,
+            tcp_mux_port: 0,
         }
     }
 }
@@ -375,32 +442,26 @@ impl Default for Config {
                 x11_startup_timeout: 10,
                 x11_extra_args: Vec::new(),
             },
-            websocket: WebSocketConfig {
-                enabled: default_websocket_enabled(),
-                host: "0.0.0.0".to_string(),
-                port: 8007,
-                max_connections: 100,
-                connection_timeout: Duration::from_secs(30),
-                compression: true,
-            },
             http: HttpConfig {
                 host: "0.0.0.0".to_string(),
                 port: 8008,
                 cors_origin: None,
+                basic_auth_enabled: true,
+                basic_auth_user: "user".to_string(),
+                basic_auth_password: "mypasswd".to_string(),
             },
             encoding: EncodingConfig {
-                jpeg_quality: 75,
-                stripe_height: 64,
                 target_fps: 30,
                 max_fps: 60,
-                keyframe_interval: 300,
-                bandwidth_limit: 0,
-                adaptive_quality: true,
             },
             input: InputConfig {
                 enable_keyboard: true,
                 enable_mouse: true,
                 enable_clipboard: true,
+                enable_binary_clipboard: false,
+                enable_commands: false,
+                file_transfers: default_file_transfers(),
+                upload_dir: default_upload_dir(),
                 mouse_sensitivity: 1.0,
             },
             audio: AudioConfig {
@@ -437,16 +498,43 @@ impl Config {
             return Err("Display dimensions must be non-zero".into());
         }
 
-        if self.encoding.jpeg_quality > 100 || self.encoding.jpeg_quality < 1 {
-            return Err("JPEG quality must be between 1 and 100".into());
-        }
-
-        if self.encoding.stripe_height == 0 {
-            return Err("Stripe height must be non-zero".into());
-        }
-
         if self.encoding.target_fps > self.encoding.max_fps {
             return Err("Target FPS cannot exceed max FPS".into());
+        }
+
+        if self.http.basic_auth_enabled && self.http.basic_auth_password.is_empty() {
+            return Err("Basic auth is enabled but password is empty".into());
+        }
+
+        for entry in &self.input.file_transfers {
+            let value = entry.trim().to_ascii_lowercase();
+            if value.is_empty() || value == "none" {
+                continue;
+            }
+            if value != "upload" && value != "download" {
+                return Err("Input file_transfers must contain \"upload\" or \"download\"".into());
+            }
+        }
+
+        if let Some(range) = self.webrtc.ephemeral_udp_port_range {
+            if range[0] == 0 || range[1] == 0 || range[0] > range[1] {
+                return Err("Invalid WebRTC ephemeral UDP port range".into());
+            }
+        }
+
+        if !self.webrtc.turn_protocol.is_empty()
+            && self.webrtc.turn_protocol != "udp"
+            && self.webrtc.turn_protocol != "tcp"
+        {
+            return Err("WebRTC TURN protocol must be \"udp\" or \"tcp\"".into());
+        }
+
+        if (!self.webrtc.turn_shared_secret.is_empty()
+            || !self.webrtc.turn_username.is_empty()
+            || !self.webrtc.turn_password.is_empty())
+            && self.webrtc.turn_host.is_empty()
+        {
+            return Err("WebRTC TURN host is required when TURN auth is configured".into());
         }
 
         if self.audio.enabled {
@@ -493,13 +581,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_invalid_quality() {
-        let mut cfg = Config::default();
-        cfg.encoding.jpeg_quality = 0;
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
     fn validate_audio_requires_channels() {
         let mut cfg = Config::default();
         cfg.audio.enabled = true;
@@ -508,18 +589,32 @@ mod tests {
     }
 }
 
-// Default value functions for WebSocketConfig
-/// WebSocket is disabled by default when WebRTC is available,
-/// enabled when building WebSocket-only binary
-fn default_websocket_enabled() -> bool {
-    #[cfg(feature = "webrtc-streaming")]
-    {
-        false
-    }
-    #[cfg(not(feature = "webrtc-streaming"))]
-    {
-        true
-    }
+fn default_basic_auth_enabled() -> bool {
+    true
+}
+
+fn default_basic_auth_user() -> String {
+    "user".to_string()
+}
+
+fn default_basic_auth_password() -> String {
+    "mypasswd".to_string()
+}
+
+fn default_file_transfers() -> Vec<String> {
+    vec!["upload".to_string(), "download".to_string()]
+}
+
+fn default_upload_dir() -> String {
+    "~/Desktop".to_string()
+}
+
+fn default_ice_trickle() -> bool {
+    true
+}
+
+fn default_turn_protocol() -> String {
+    "udp".to_string()
 }
 
 // Default value functions for DisplayConfig

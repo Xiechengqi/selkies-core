@@ -9,7 +9,6 @@
 - **硬件加速** - Intel VA-API, NVIDIA NVENC, Intel Quick Sync Video
 - **自适应比特率** - 基于网络状况动态调整比特率
 - **输入注入** - 通过 WebRTC DataChannel 支持键盘/鼠标/剪贴板
-- **双模式支持** - WebRTC（默认）+ WebSocket 备用模式
 - **音频流媒体** - 可选音频捕获和流媒体传输
 - **自动 X11 管理** - 无 DISPLAY 时自动创建虚拟 X11 服务器（Xvfb）
 - **Web UI** - 内置 Web 界面，便于访问
@@ -17,18 +16,11 @@
 
 ## 技术架构
 
-### WebRTC 模式（默认）
+### 流媒体管道
 
 ```
 X11 Screen → GStreamer ximagesrc → H.264/VP8 Encoder → RTP → WebRTC → Browser
 Browser Input → RTCDataChannel → SCTP/DTLS → Parse → XTest → X11
-```
-
-### WebSocket 模式（备用）
-
-```
-X11 Screen → XShm Capture → RGB Frame → TurboJPEG → WebSocket → Browser
-Browser Input → WebSocket Text → Parse → XTest → X11
 ```
 
 ### 模块结构
@@ -38,9 +30,7 @@ Browser Input → WebSocket Text → Parse → XTest → X11
 | `gstreamer/` | GStreamer 管道、编码器选择、屏幕捕获 |
 | `webrtc/` | WebRTC 会话管理、信令、DataChannel |
 | `display/` | 自动 X11 DISPLAY 检测和虚拟服务器管理 |
-| `capture/` | X11 XShm 零拷贝屏幕捕获（备用模式） |
-| `encode/` | 条纹化 JPEG 编码（备用模式） |
-| `transport/` | WebSocket 服务器和 WebRTC 信令 |
+| `transport/` | WebRTC 信令服务器 |
 | `input/` | XTest 鼠标/键盘事件注入 |
 | `audio/` | 音频捕获和 Opus 编码（可选） |
 | `web/` | Axum HTTP 服务器 |
@@ -80,7 +70,8 @@ Browser Input → WebSocket Text → Parse → XTest → X11
 
 ```bash
 apt-get install build-essential pkg-config \
-  libjpeg-turbo8-dev libx11-dev libxcb1-dev libxkbcommon-dev
+  libx11-dev libxcb1-dev libxkbcommon-dev \
+  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 ```
 
 ### X11 虚拟显示（推荐）
@@ -97,7 +88,7 @@ which Xvfb
 
 **注意**: 如果启用了 `auto_x11` 配置（默认启用），selkies-core 会在没有可用 DISPLAY 时自动启动 Xvfb。
 
-### GStreamer 依赖（WebRTC 模式必需）
+### GStreamer 依赖
 
 ```bash
 # 核心 GStreamer 包
@@ -132,16 +123,8 @@ apt-get install libpulse-dev libopus-dev libasound2-dev
 
 ## 编译
 
-### WebRTC 模式（默认）
-
 ```bash
 cargo build --release
-```
-
-### WebSocket 备用模式（无 GStreamer）
-
-```bash
-cargo build --release --no-default-features --features websocket-legacy
 ```
 
 ### 带硬件加速支持
@@ -220,7 +203,7 @@ DISPLAY=:0 ./target/release/selkies-core
 ### 覆盖端口
 
 ```bash
-./target/release/selkies-core --port 8080 --http-port 8000
+./target/release/selkies-core --http-port 8000
 ```
 
 ### 前台调试模式
@@ -257,14 +240,6 @@ WebRTC 信令通过 `/webrtc` WebSocket 端点提供：
 ws://localhost:8000/webrtc
 ```
 
-### WebSocket 备用连接
-
-WebSocket 服务器默认监听 `8080` 端口：
-
-```
-ws://localhost:8080/websockets
-```
-
 ## HTTP 端点
 
 | 端点 | 说明 |
@@ -274,7 +249,6 @@ ws://localhost:8080/websockets
 | `GET /metrics` | Prometheus 指标 |
 | `GET /clients` | 活跃连接列表 |
 | `GET /ui-config` | UI 配置 |
-| `GET /ws-config` | WebSocket 配置 |
 | `GET /webrtc` | WebRTC 信令 WebSocket（升级） |
 
 ## 配置选项
@@ -296,17 +270,12 @@ x11_display_range = [99, 199]  # 自动分配的 DISPLAY 编号范围
 x11_startup_timeout = 10    # Xvfb 启动超时（秒）
 x11_extra_args = []         # 传递给 Xvfb 的额外参数
 
-[websocket]
-host = "0.0.0.0"            # WebSocket 监听地址
-port = 8080                 # WebSocket 端口
-
 [http]
 port = 8000                 # HTTP 端口
 
 [encoding]
 target_fps = 30             # 目标帧率
-jpeg_quality = 80           # JPEG 质量 (1-100)
-stripe_height = 16          # 条纹高度
+max_fps = 60                # 最大帧率
 ```
 
 ### WebRTC 配置
@@ -465,7 +434,7 @@ WebRTC 信令使用 JSON 格式通过 WebSocket 传输：
 
 ### WebRTC DataChannel 输入协议
 
-输入事件通过 DataChannel 传输，格式与 WebSocket 模式兼容：
+输入事件通过 DataChannel 传输：
 
 | 格式 | 说明 |
 |------|------|
@@ -475,15 +444,6 @@ WebRTC 信令使用 JSON 格式通过 WebSocket 传输：
 | `k,{keysym},{pressed}` | 键盘事件 |
 | `t,{text}` | 文本输入 |
 | `c,{base64}` | 剪贴板数据 |
-
-### WebSocket 备用协议
-
-| 方向 | 格式 | 说明 |
-|------|------|------|
-| S→C | `s,{y},{h},{base64}` | 视频条纹 |
-| S→C | `a,{base64}` | 音频数据 |
-| C→S | `m,{x},{y}` | 鼠标移动 |
-| C→S | `k,{keysym},{pressed}` | 键盘事件 |
 
 ## Docker 部署
 
@@ -495,7 +455,6 @@ FROM rust:1.70 AS builder
 # 安装依赖
 RUN apt-get update && apt-get install -y \
     pkg-config \
-    libjpeg-turbo8-dev \
     libx11-dev \
     libxcb1-dev \
     libxkbcommon-dev \
@@ -510,7 +469,6 @@ FROM ubuntu:22.04
 
 # 安装运行时依赖
 RUN apt-get update && apt-get install -y \
-    libjpeg-turbo8 \
     libx11-6 \
     libxcb1 \
     xvfb \
@@ -525,30 +483,18 @@ RUN apt-get update && apt-get install -y \
 COPY --from=builder /build/target/release/selkies-core /usr/local/bin/
 COPY config.example.toml /etc/selkies-core.toml
 
-EXPOSE 8000 8080
+EXPOSE 8000
 
 CMD ["selkies-core", "--config", "/etc/selkies-core.toml"]
 ```
 
 ## 性能特点
 
-### WebRTC 模式
-
 - **硬件加速编码** - VA-API, NVENC, QSV 支持
 - **低延迟流媒体** - 典型延迟 < 100ms
 - **自适应比特率** - 根据网络状况动态调整
 - **RTP 传输** - 高效的实时传输协议
 - **GStreamer 管道** - 成熟的多媒体框架
-
-### WebSocket 模式
-
-- **XShm 零拷贝** - 高效屏幕捕获
-- **条纹化编码** - 仅传输变化区域
-- **xxHash64** - 快速变化检测
-- **TurboJPEG** - 高性能 JPEG 编码
-
-### 通用优化
-
 - **mimalloc** - 高性能内存分配
 - **LTO 优化** - 链接时优化
 - **异步 I/O** - Tokio 异步运行时
@@ -690,30 +636,6 @@ keyframe_interval = 30
 [display]
 width = 1280
 height = 720
-```
-
-## 架构迁移说明
-
-selkies-core 已从 **WebSocket + TurboJPEG** 架构迁移到 **WebRTC + GStreamer** 架构。
-
-### 主要变化
-
-- **默认模式**: WebRTC 流媒体（低延迟，硬件加速）
-- **备用模式**: WebSocket 流媒体（兼容性，无需 GStreamer）
-- **新增模块**: `gstreamer/` 和 `webrtc/` 模块
-- **协议兼容**: DataChannel 输入协议与 WebSocket 模式兼容
-
-### 迁移指南
-
-如果您需要使用旧的 WebSocket 模式：
-
-```bash
-# 编译时禁用 WebRTC
-cargo build --release --no-default-features --features websocket-legacy
-
-# 或在配置文件中禁用
-[webrtc]
-enabled = false
 ```
 
 ## 限制说明

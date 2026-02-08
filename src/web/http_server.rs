@@ -4,35 +4,29 @@
 
 #![allow(dead_code)]
 
-use crate::web::embedded_assets::{get_embedded_file, get_index_html_with_port, has_embedded_assets};
+use crate::web::embedded_assets::{get_embedded_file, has_embedded_assets};
 use crate::web::shared::SharedState;
 use axum::{
     body::Body,
     extract::State,
-    http::{header, StatusCode, Uri},
+    extract::WebSocketUpgrade,
+    http::{header, Request, StatusCode, Uri},
+    middleware,
     response::Response,
     routing::get,
     Router,
 };
 
-#[cfg(feature = "webrtc-streaming")]
-use axum::extract::WebSocketUpgrade;
 use log::info;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::services::{ServeDir, ServeFile};
+use base64::Engine;
 
-#[cfg(feature = "webrtc-streaming")]
 use crate::webrtc::SessionManager;
 
-/// Run the HTTP health check server
-pub async fn run_http_server(port: u16, state: Arc<SharedState>) -> Result<(), Box<dyn std::error::Error>> {
-    run_http_server_with_webrtc(port, state, None).await
-}
-
-/// Run the HTTP server with optional WebRTC signaling support
-#[cfg(feature = "webrtc-streaming")]
+/// Run the HTTP server with WebRTC signaling support
 pub async fn run_http_server_with_webrtc(
     port: u16,
     state: Arc<SharedState>,
@@ -59,15 +53,14 @@ pub async fn run_http_server_with_webrtc(
         }
     }
 
-    // Build router with WebRTC signaling endpoint if available
+    // Build router
     let mut app = Router::new()
         .route("/", get(index_handler))
         .route("/index.html", get(index_handler))
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
         .route("/clients", get(clients_handler))
-        .route("/ui-config", get(ui_config_handler))
-        .route("/ws-config", get(ws_config_handler));
+        .route("/ui-config", get(ui_config_handler));
 
     // Add WebRTC signaling endpoint if session manager is provided
     if let Some(manager) = session_manager {
@@ -87,6 +80,7 @@ pub async fn run_http_server_with_webrtc(
     }
 
     // Set up fallback for static files
+    let auth_state = state.clone();
     let app: Router<()> = if use_embedded {
         app.fallback(embedded_fallback_handler)
             .with_state(state)
@@ -99,77 +93,11 @@ pub async fn run_http_server_with_webrtc(
             .with_state(state)
     };
 
-    let listener = TcpListener::bind(&addr).await?;
-    info!("HTTP server listening on http://{}", addr);
-
-    // axum 0.8: Router<()> can be used directly with serve
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-
-    Ok(())
-}
-
-/// Fallback for non-WebRTC builds
-#[cfg(not(feature = "webrtc-streaming"))]
-pub async fn run_http_server_with_webrtc(
-    port: u16,
-    state: Arc<SharedState>,
-    _session_manager: Option<Arc<()>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Just call the regular HTTP server without WebRTC support
-    run_http_server_impl(port, state).await
-}
-
-/// Internal implementation of HTTP server
-async fn run_http_server_impl(port: u16, state: Arc<SharedState>) -> Result<(), Box<dyn std::error::Error>> {
-    let addr = format!("0.0.0.0:{}", port);
-
-    // Check for embedded assets first, then fall back to filesystem
-    let use_embedded = has_embedded_assets() && std::env::var("SELKIES_WEB_ROOT").is_err();
-
-    if use_embedded {
-        info!("Serving web UI from embedded assets");
-    } else {
-        let static_root = std::env::var("SELKIES_WEB_ROOT")
-            .unwrap_or_else(|_| "web/selkies".to_string());
-        let cwd = std::env::current_dir().ok();
-        let index_path = PathBuf::from(&static_root).join("index.html");
-        info!(
-            "Serving web UI from {:?} (cwd: {:?})",
-            static_root, cwd
-        );
-        if !index_path.exists() {
-            info!("Web UI index not found at {:?}", index_path);
-        }
-    }
-
-    let app = Router::new()
-        .route("/", get(index_handler))
-        .route("/index.html", get(index_handler))
-        .route("/health", get(health_handler))
-        .route("/metrics", get(metrics_handler))
-        .route("/clients", get(clients_handler))
-        .route("/ui-config", get(ui_config_handler))
-        .route("/ws-config", get(ws_config_handler));
-
-    // Set up fallback for static files
-    let app: Router<()> = if use_embedded {
-        app.fallback(embedded_fallback_handler)
-            .with_state(state)
-    } else {
-        let static_root = std::env::var("SELKIES_WEB_ROOT")
-            .unwrap_or_else(|_| "web/selkies".to_string());
-        let index_path = PathBuf::from(&static_root).join("index.html");
-        let static_service = ServeDir::new(&static_root).fallback(ServeFile::new(index_path));
-        app.fallback_service(static_service)
-            .with_state(state)
-    };
+    let app = app.layer(middleware::from_fn_with_state(auth_state, basic_auth_middleware));
 
     let listener = TcpListener::bind(&addr).await?;
     info!("HTTP server listening on http://{}", addr);
 
-    // axum 0.8: Router<()> can be used directly with serve
     axum::serve(listener, app)
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
@@ -214,37 +142,104 @@ selkies_core_cpu_percent {}
 # HELP selkies_core_mem_bytes Process RSS in bytes
 # TYPE selkies_core_mem_bytes gauge
 selkies_core_mem_bytes {}
+# HELP selkies_core_client_latency_ms Client-reported latency in ms
+# TYPE selkies_core_client_latency_ms gauge
+selkies_core_client_latency_ms {}
+# HELP selkies_core_client_fps Client-reported FPS
+# TYPE selkies_core_client_fps gauge
+selkies_core_client_fps {}
+# HELP selkies_core_ice_candidates_total Total ICE candidates observed
+# TYPE selkies_core_ice_candidates_total counter
+selkies_core_ice_candidates_total {}
+# HELP selkies_core_ice_candidates_udp Total ICE candidates over UDP
+# TYPE selkies_core_ice_candidates_udp counter
+selkies_core_ice_candidates_udp {}
+# HELP selkies_core_ice_candidates_tcp Total ICE candidates over TCP
+# TYPE selkies_core_ice_candidates_tcp counter
+selkies_core_ice_candidates_tcp {}
+# HELP selkies_core_ice_candidates_host Total ICE candidates of type host
+# TYPE selkies_core_ice_candidates_host counter
+selkies_core_ice_candidates_host {}
+# HELP selkies_core_ice_candidates_srflx Total ICE candidates of type srflx
+# TYPE selkies_core_ice_candidates_srflx counter
+selkies_core_ice_candidates_srflx {}
+# HELP selkies_core_ice_candidates_relay Total ICE candidates of type relay
+# TYPE selkies_core_ice_candidates_relay counter
+selkies_core_ice_candidates_relay {}
+# HELP selkies_core_ice_candidates_prflx Total ICE candidates of type prflx
+# TYPE selkies_core_ice_candidates_prflx counter
+selkies_core_ice_candidates_prflx {}
 "#,
-        uptime, clients, stats.cpu_percent, stats.mem_used
+        uptime,
+        clients,
+        stats.cpu_percent,
+        stats.mem_used,
+        stats.client_latency_ms,
+        stats.client_fps,
+        stats.ice_candidates_total,
+        stats.ice_candidates_udp,
+        stats.ice_candidates_tcp,
+        stats.ice_candidates_host,
+        stats.ice_candidates_srflx,
+        stats.ice_candidates_relay,
+        stats.ice_candidates_prflx
     )
 }
 
-/// Clients handler
+async fn basic_auth_middleware(
+    State(state): State<Arc<SharedState>>,
+    req: Request<Body>,
+    next: middleware::Next,
+) -> Response {
+    if !state.config.http.basic_auth_enabled {
+        return next.run(req).await;
+    }
+
+    if req.uri().path() == "/health" {
+        return next.run(req).await;
+    }
+
+    match req.headers().get(header::AUTHORIZATION) {
+        Some(value) => {
+            if let Ok(value_str) = value.to_str() {
+                if let Some(encoded) = value_str.strip_prefix("Basic ") {
+                    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) {
+                        if let Ok(decoded_str) = String::from_utf8(decoded) {
+                            if let Some((user, pass)) = decoded_str.split_once(':') {
+                                if user == state.config.http.basic_auth_user
+                                    && pass == state.config.http.basic_auth_password
+                                {
+                                    return next.run(req).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None => {}
+    }
+
+    let mut response = Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .body(Body::from("Unauthorized"))
+        .unwrap_or_else(|_| Response::new(Body::empty()));
+    response.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        header::HeaderValue::from_static("Basic realm=\"selkies-core\""),
+    );
+    response
+}
+
+/// Clients handler - returns WebRTC session count
 async fn clients_handler(State(state): State<Arc<SharedState>>) -> String {
-    let clients = state.get_all_clients();
-    let client_list: Vec<String> = clients
-        .iter()
-        .map(|c| {
-            format!(
-                r#"{{
-    "id": "{}",
-    "address": "{}",
-    "connected_seconds": {:.2}
-  }}"#,
-                c.id,
-                c.address,
-                c.connected_at.elapsed().as_secs_f64()
-            )
-        })
-        .collect();
+    let webrtc_sessions = state.webrtc_sessions();
 
     format!(
         r#"{{
-  "count": {},
-  "clients": [{}]
+  "webrtc_sessions": {}
 }}"#,
-        clients.len(),
-        client_list.join(",")
+        webrtc_sessions
     )
 }
 
@@ -253,19 +248,12 @@ async fn ui_config_handler(State(state): State<Arc<SharedState>>) -> String {
     state.ui_config_json()
 }
 
-/// WebSocket configuration handler
-async fn ws_config_handler(State(state): State<Arc<SharedState>>) -> String {
-    format!(r#"{{"ws_port":{}}}"#, state.config.websocket.port)
-}
-
-async fn index_handler(State(state): State<Arc<SharedState>>) -> Response {
-    let ws_port = state.config.websocket.port;
-
+async fn index_handler(State(_state): State<Arc<SharedState>>) -> Response {
     // Check for embedded assets first, then fall back to filesystem
     let use_embedded = has_embedded_assets() && std::env::var("SELKIES_WEB_ROOT").is_err();
 
     if use_embedded {
-        return get_index_html_with_port(ws_port);
+        return get_embedded_file("index.html");
     }
 
     // Fallback to filesystem
@@ -274,22 +262,11 @@ async fn index_handler(State(state): State<Arc<SharedState>>) -> Response {
     let index_path = PathBuf::from(&static_root).join("index.html");
     match tokio::fs::read(&index_path).await {
         Ok(data) => {
-            let injected = match String::from_utf8(data) {
-                Ok(mut html) => {
-                    let port = ws_port.to_string();
-                    // Only replace the string literal placeholder, not the variable name
-                    if html.contains("__SELKIES_INJECTED_PORT__") {
-                        html = html.replace("__SELKIES_INJECTED_PORT__", &port);
-                    }
-                    Body::from(html)
-                }
-                Err(err) => Body::from(err.into_bytes()),
-            };
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
                 .header(header::CACHE_CONTROL, "no-store, max-age=0")
-                .body(injected)
+                .body(Body::from(data))
                 .unwrap()
         }
         Err(_) => Response::builder()

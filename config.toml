@@ -13,25 +13,21 @@ width = 0
 # Display height (0 = auto-detect)
 height = 0
 
-[websocket]
-# WebSocket server host
-host = "0.0.0.0"
-# WebSocket server port
-port = 8080
-
 [http]
 # HTTP server port (for health checks and WebRTC signaling)
 port = 8000
+# Enable HTTP basic authentication
+basic_auth_enabled = true
+# Basic auth username
+basic_auth_user = "user"
+# Basic auth password
+basic_auth_password = "mypasswd"
 
 [encoding]
 # Target frames per second
 target_fps = 30
 # Maximum frames per second
 max_fps = 60
-# JPEG quality (1-100, higher = better quality)
-jpeg_quality = 80
-# Stripe height for JPEG encoding (pixels)
-stripe_height = 16
 
 [input]
 # Enable keyboard input
@@ -40,6 +36,14 @@ enable_keyboard = true
 enable_mouse = true
 # Enable clipboard sync
 enable_clipboard = true
+# Enable binary clipboard sync
+enable_binary_clipboard = false
+# Enable command execution from client messages
+enable_commands = false
+# Allowed file transfer directions (use [] or ["download"] to disable uploads)
+file_transfers = ["upload", "download"]
+# Directory to store uploaded files
+upload_dir = "~/Desktop"
 # Mouse sensitivity multiplier
 mouse_sensitivity = 1.0
 
@@ -62,12 +66,16 @@ level = "info"
 format = "json"
 
 # ============================================================================
-# WebRTC Configuration (requires webrtc-streaming feature)
+# WebRTC Configuration
 # ============================================================================
 
 [webrtc]
 # Enable WebRTC streaming (default: true if feature is enabled)
 enabled = true
+# Network profile: "lan" or "wan" (optional)
+network_profile = ""
+# Enable Trickle ICE (send candidates as they are found)
+ice_trickle = true
 
 # Video codec: "h264", "vp8", "vp9", "av1"
 video_codec = "h264"
@@ -109,6 +117,34 @@ pipeline_latency_ms = 50
 
 # Keyframe interval in frames (lower = more keyframes = better error recovery)
 keyframe_interval = 60
+
+# NAT 1:1 external IP mappings (optional)
+nat1to1_ips = []
+
+# URL to fetch external IP if nat1to1_ips is empty (optional)
+ip_retrieval_url = ""
+
+# STUN host/port (optional)
+stun_host = "stun.l.google.com"
+stun_port = 19302
+
+# TURN settings (optional)
+turn_host = ""
+turn_port = 3478
+turn_protocol = "udp"
+turn_tls = false
+turn_shared_secret = ""
+turn_username = ""
+turn_password = ""
+
+# Ephemeral UDP port range for ICE (optional)
+ephemeral_udp_port_range = [59000, 59100]
+
+# Single UDP mux port for all peers (0 to disable)
+udp_mux_port = 0
+
+# Single TCP mux port for all peers (0 to disable)
+tcp_mux_port = 0
 
 # ICE servers for NAT traversal (STUN/TURN)
 # Multiple servers can be configured for redundancy

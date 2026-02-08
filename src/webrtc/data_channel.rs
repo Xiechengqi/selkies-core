@@ -7,9 +7,14 @@
 
 use super::WebRTCError;
 use crate::input::{InputEvent, InputEventData};
+use crate::file_upload::FileUploadHandler;
+use crate::runtime_settings::RuntimeSettings;
+use crate::clipboard::ClipboardReceiver;
+use crate::web::SharedState;
 use log::{info, warn, debug, error};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use std::sync::Mutex;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 
@@ -17,6 +22,10 @@ use webrtc::data_channel::data_channel_message::DataChannelMessage;
 pub struct InputDataChannel {
     channel: Arc<RTCDataChannel>,
     input_tx: mpsc::UnboundedSender<InputEventData>,
+    upload_handler: Arc<Mutex<FileUploadHandler>>,
+    clipboard: Arc<Mutex<ClipboardReceiver>>,
+    runtime_settings: Arc<RuntimeSettings>,
+    shared_state: Arc<SharedState>,
 }
 
 impl InputDataChannel {
@@ -24,30 +33,120 @@ impl InputDataChannel {
     pub fn new(
         channel: Arc<RTCDataChannel>,
         input_tx: mpsc::UnboundedSender<InputEventData>,
+        upload_handler: Arc<Mutex<FileUploadHandler>>,
+        clipboard: Arc<Mutex<ClipboardReceiver>>,
+        runtime_settings: Arc<RuntimeSettings>,
+        shared_state: Arc<SharedState>,
     ) -> Self {
-        Self { channel, input_tx }
+        Self {
+            channel,
+            input_tx,
+            upload_handler,
+            clipboard,
+            runtime_settings,
+            shared_state,
+        }
     }
 
     /// Set up message handling callbacks
     pub async fn setup_handlers(&self) {
         let input_tx = self.input_tx.clone();
+        let upload_handler = self.upload_handler.clone();
+        let clipboard = self.clipboard.clone();
+        let runtime_settings = self.runtime_settings.clone();
+        let shared_state = self.shared_state.clone();
         let channel_label = self.channel.label().to_string();
 
         // Handle incoming messages
         self.channel.on_message(Box::new(move |msg: DataChannelMessage| {
             let input_tx = input_tx.clone();
             let label = channel_label.clone();
+            let upload_handler = upload_handler.clone();
+            let clipboard = clipboard.clone();
+            let runtime_settings = runtime_settings.clone();
+            let shared_state = shared_state.clone();
 
             Box::pin(async move {
-                match Self::parse_input_message(&msg.data) {
-                    Ok(event) => {
-                        if let Err(e) = input_tx.send(event) {
-                            warn!("Failed to send input event: {}", e);
+                if msg.is_string {
+                    let text = match std::str::from_utf8(&msg.data) {
+                        Ok(text) => text,
+                        Err(e) => {
+                            debug!("Failed to parse UTF-8 from {}: {}", label, e);
+                            return;
+                        }
+                    };
+                    if upload_handler.lock().unwrap().handle_control_message(text) {
+                        return;
+                    }
+                    if clipboard.lock().unwrap().handle_message(text) {
+                        return;
+                    }
+                    if shared_state.handle_command_message(text) {
+                        return;
+                    }
+                    if text.starts_with("SETTINGS,") {
+                        let payload = text.trim_start_matches("SETTINGS,");
+                        runtime_settings.apply_settings_json(payload);
+                        return;
+                    }
+                    if runtime_settings.handle_simple_message(text) {
+                        return;
+                    }
+                    if text == "kr" {
+                        return;
+                    }
+                    if text.starts_with("s,") {
+                        return;
+                    }
+                    if text.starts_with("r,") {
+                        return;
+                    }
+                    if text.starts_with("SET_NATIVE_CURSOR_RENDERING,") {
+                        return;
+                    }
+                    if text.starts_with("_arg_fps,") {
+                        let payload = text.trim_start_matches("_arg_fps,");
+                        if let Ok(fps) = payload.parse::<u32>() {
+                            runtime_settings.set_target_fps(fps);
+                        }
+                        return;
+                    }
+                    if text.starts_with("_f,") {
+                        let payload = text.trim_start_matches("_f,");
+                        if let Ok(fps) = payload.parse::<u32>() {
+                            shared_state.update_client_fps(fps);
+                        }
+                        return;
+                    }
+                    if text.starts_with("_l,") {
+                        let payload = text.trim_start_matches("_l,");
+                        if let Ok(latency) = payload.parse::<u64>() {
+                            shared_state.update_client_latency(latency);
+                        }
+                        return;
+                    }
+                    if text.starts_with("_stats_video,") {
+                        let payload = text.trim_start_matches("_stats_video,");
+                        shared_state.update_webrtc_stats("video", payload);
+                        return;
+                    }
+                    if text.starts_with("_stats_audio,") {
+                        let payload = text.trim_start_matches("_stats_audio,");
+                        shared_state.update_webrtc_stats("audio", payload);
+                        return;
+                    }
+                    match Self::parse_input_text(text) {
+                        Ok(event) => {
+                            if let Err(e) = input_tx.send(event) {
+                                warn!("Failed to send input event: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            debug!("Failed to parse input from {}: {}", label, e);
                         }
                     }
-                    Err(e) => {
-                        debug!("Failed to parse input from {}: {}", label, e);
-                    }
+                } else {
+                    debug!("Ignoring non-text message on input channel {}", label);
                 }
             })
         }));
@@ -226,6 +325,53 @@ impl InputDataChannel {
         self.channel.close().await
             .map_err(|e| WebRTCError::DataChannelError(format!("Close failed: {}", e)))?;
         Ok(())
+    }
+}
+
+/// Auxiliary DataChannel handler (file uploads)
+pub struct AuxDataChannel {
+    channel: Arc<RTCDataChannel>,
+    upload_handler: Arc<Mutex<FileUploadHandler>>,
+}
+
+impl AuxDataChannel {
+    pub fn new(channel: Arc<RTCDataChannel>, upload_handler: Arc<Mutex<FileUploadHandler>>) -> Self {
+        Self { channel, upload_handler }
+    }
+
+    pub async fn setup_handlers(&self) {
+        let upload_handler = self.upload_handler.clone();
+        let channel_label = self.channel.label().to_string();
+
+        self.channel.on_message(Box::new(move |msg: DataChannelMessage| {
+            let upload_handler = upload_handler.clone();
+            let label = channel_label.clone();
+
+            Box::pin(async move {
+                if msg.is_string {
+                    debug!("Ignoring text message on auxiliary channel {}", label);
+                } else {
+                    upload_handler.lock().unwrap().handle_binary(&msg.data);
+                }
+            })
+        }));
+
+        self.channel.on_open(Box::new(move || {
+            info!("Auxiliary DataChannel opened");
+            Box::pin(async {})
+        }));
+
+        let upload_handler = self.upload_handler.clone();
+        self.channel.on_close(Box::new(move || {
+            info!("Auxiliary DataChannel closed");
+            upload_handler.lock().unwrap().abort_active();
+            Box::pin(async {})
+        }));
+
+        self.channel.on_error(Box::new(move |err| {
+            error!("Auxiliary DataChannel error: {}", err);
+            Box::pin(async {})
+        }));
     }
 }
 

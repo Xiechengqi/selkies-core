@@ -22,7 +22,6 @@
  * under the License.
  */
 
-import { GamepadManager } from './gamepad.js?v=1';
 import { Queue } from './util.js?v=1';
 
 /**
@@ -1138,13 +1137,10 @@ export class Input {
         this.mouseRelative = false;
         this.m = null;
         this.buttonMask = 0;
-        this.gamepadManager = null;
         this.x = 0;
         this.y = 0;
         this.onmenuhotkey = null;
         this.onfullscreenhotkey = this.enterFullscreen;
-        this.ongamepadconnected = null;
-        this.ongamepaddisconneceted = null;
         this.listeners = [];
         this.listeners_context = [];
         this._queue = new Queue();
@@ -2404,44 +2400,6 @@ export class Input {
         return Math.round(serverY);
     }
 
-    _gamepadConnected(event) {
-        const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
-        if (server_gp_index === undefined || server_gp_index === null) return;
-        if (!this.gamepadManager) {
-            this.gamepadManager = new GamepadManager(event.gamepad, this._gamepadButton.bind(this), this._gamepadAxis.bind(this));
-        }
-        const connectMsg = "js,c," + server_gp_index + "," + btoa(event.gamepad.id) + "," + event.gamepad.axes.length + "," + event.gamepad.buttons.length;
-        this.send(connectMsg);
-        if (this.ongamepadconnected !== null) { this.ongamepadconnected(event.gamepad.id); }
-    }
-
-    _gamepadDisconnect(event) {
-         if (this.ongamepaddisconneceted !== null) { this.ongamepaddisconneceted(); }
-         const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
-         if (server_gp_index === undefined || server_gp_index === null) return;
-         this.send("js,d," + server_gp_index);
-    }
-
-    _gamepadButton(gp_num, btn_num, val) {
-        const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
-        if (server_gp_index === undefined || server_gp_index < 0) return;
-
-        this.send("js,b," + server_gp_index + "," + btn_num + "," + val);
-        if (this._isSidebarOpen) {
-            window.postMessage({ type: 'gamepadButtonUpdate', gamepadIndex: server_gp_index, buttonIndex: btn_num, value: val }, window.location.origin);
-        }
-    }
-
-    _gamepadAxis(gp_num, axis_num, val) {
-        const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
-        if (server_gp_index === undefined || server_gp_index < 0) return;
-
-        this.send("js,a," + server_gp_index + "," + axis_num + "," + val);
-        if (this._isSidebarOpen) {
-            window.postMessage({ type: 'gamepadAxisUpdate', gamepadIndex: server_gp_index, axisIndex: axis_num, value: val }, window.location.origin);
-        }
-    }
-
     _onFullscreenChange() {
         if (document.fullscreenElement === this.element.parentElement) {
             if (document.pointerLockElement !== this.element) {
@@ -2488,8 +2446,6 @@ export class Input {
         this.listeners.push(addListener(document, 'pointerlockchange', this._pointerLock, this));
         this.listeners.push(addListener(document, 'fullscreenchange', this._onFullscreenChange, this));
         this.listeners.push(addListener(window, 'resize', this._windowMath, this));
-        this.listeners.push(addListener(window, 'gamepadconnected', this._gamepadConnected, this));
-        this.listeners.push(addListener(window, 'gamepaddisconnected', this._gamepadDisconnect, this));
         this.listeners.push(addListener(window, 'message', this._handleVisibilityMessage, this));
 
         if (!this.isSharedMode) {
@@ -2566,10 +2522,6 @@ export class Input {
     detach() {
         removeListeners(this.listeners);
         this.listeners = [];
-        if (this.gamepadManager) {
-            this.gamepadManager.destroy();
-            this.gamepadManager = null;
-        }
         this.detach_context();
     }
 

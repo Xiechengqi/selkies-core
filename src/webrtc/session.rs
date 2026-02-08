@@ -8,14 +8,19 @@
 //! - DataChannel handling
 //! - Session state tracking
 
-use super::{WebRTCError, peer_connection::PeerConnectionManager, data_channel::InputDataChannel, media_track::VideoTrackWriter};
+use super::{WebRTCError, peer_connection::PeerConnectionManager, data_channel::{InputDataChannel, AuxDataChannel}, media_track::VideoTrackWriter};
 use crate::config::{WebRTCConfig, VideoCodec};
+use crate::file_upload::{FileUploadHandler, FileUploadSettings};
+use crate::runtime_settings::RuntimeSettings;
+use crate::clipboard::ClipboardReceiver;
+use crate::web::SharedState;
 use crate::input::InputEventData;
 use log::{info, debug};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
+use std::sync::Mutex;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
@@ -181,6 +186,12 @@ pub struct SessionManager {
     pc_manager: PeerConnectionManager,
     /// Input event sender
     input_tx: mpsc::UnboundedSender<InputEventData>,
+    /// File upload settings
+    upload_settings: FileUploadSettings,
+    /// Runtime settings updater
+    runtime_settings: Arc<RuntimeSettings>,
+    /// Shared state for clipboard handling
+    shared_state: Arc<SharedState>,
     /// Maximum concurrent sessions
     max_sessions: usize,
 }
@@ -190,6 +201,9 @@ impl SessionManager {
     pub fn new(
         config: WebRTCConfig,
         input_tx: mpsc::UnboundedSender<InputEventData>,
+        upload_settings: FileUploadSettings,
+        runtime_settings: Arc<RuntimeSettings>,
+        shared_state: Arc<SharedState>,
         max_sessions: usize,
     ) -> Self {
         let pc_manager = PeerConnectionManager::new(config.clone());
@@ -199,6 +213,9 @@ impl SessionManager {
             config,
             pc_manager,
             input_tx,
+            upload_settings,
+            runtime_settings,
+            shared_state,
             max_sessions,
         }
     }
@@ -249,6 +266,11 @@ impl SessionManager {
         let _session_weak = Arc::downgrade(session);
         let sessions = self.sessions.clone();
         let session_id = session.id.clone();
+        let upload_settings = self.upload_settings.clone();
+        let upload_handler = Arc::new(Mutex::new(FileUploadHandler::new(upload_settings)));
+        let runtime_settings = self.runtime_settings.clone();
+        let shared_state = self.shared_state.clone();
+        let clipboard_handler = Arc::new(Mutex::new(ClipboardReceiver::new(shared_state.clone())));
 
         // Connection state change callback
         let session_id_clone = session_id.clone();
@@ -277,9 +299,17 @@ impl SessionManager {
         // Data channel callback
         let input_tx = self.input_tx.clone();
         let session_for_dc = session.clone();
+        let upload_handler_dc = upload_handler.clone();
+        let runtime_settings_dc = runtime_settings.clone();
+        let clipboard_dc = clipboard_handler.clone();
+        let shared_state_dc = shared_state.clone();
         session.peer_connection.on_data_channel(Box::new(move |channel| {
             let input_tx = input_tx.clone();
             let session = session_for_dc.clone();
+            let upload_handler = upload_handler_dc.clone();
+            let runtime_settings = runtime_settings_dc.clone();
+            let clipboard = clipboard_dc.clone();
+            let shared_state = shared_state_dc.clone();
 
             Box::pin(async move {
                 let label = channel.label().to_string();
@@ -289,8 +319,18 @@ impl SessionManager {
                     session.set_input_channel(channel.clone()).await;
 
                     // Set up input handler
-                    let input_handler = InputDataChannel::new(channel, input_tx);
+                    let input_handler = InputDataChannel::new(
+                        channel,
+                        input_tx,
+                        upload_handler.clone(),
+                        clipboard.clone(),
+                        runtime_settings.clone(),
+                        shared_state.clone(),
+                    );
                     input_handler.setup_handlers().await;
+                } else if label == "data" {
+                    let aux_handler = AuxDataChannel::new(channel, upload_handler.clone());
+                    aux_handler.setup_handlers().await;
                 }
             })
         }));
@@ -363,7 +403,11 @@ impl SessionManager {
         let session = self.get_session(session_id).await
             .ok_or_else(|| WebRTCError::SessionNotFound(session_id.to_string()))?;
 
-        let answer_sdp = PeerConnectionManager::handle_offer(&session.peer_connection, sdp).await?;
+        let answer_sdp = PeerConnectionManager::handle_offer(
+            &session.peer_connection,
+            sdp,
+            self.config.ice_trickle,
+        ).await?;
         session.touch().await;
 
         Ok(answer_sdp)

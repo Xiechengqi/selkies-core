@@ -6,30 +6,15 @@
 //! - RTP video transmission
 //! - DataChannel for input events
 
-#[cfg(feature = "webrtc-streaming")]
 pub mod peer_connection;
-
-#[cfg(feature = "webrtc-streaming")]
 pub mod signaling;
-
-#[cfg(feature = "webrtc-streaming")]
 pub mod data_channel;
-
-#[cfg(feature = "webrtc-streaming")]
 pub mod media_track;
-
-#[cfg(feature = "webrtc-streaming")]
 pub mod session;
 
-
-#[cfg(feature = "webrtc-streaming")]
 pub use signaling::SignalingMessage;
-
-
-#[cfg(feature = "webrtc-streaming")]
 pub use session::SessionManager;
 
-#[cfg(feature = "webrtc-streaming")]
 #[allow(unused_imports)]
 pub use session::WebRTCSession;
 
@@ -74,9 +59,3 @@ impl fmt::Display for WebRTCError {
 }
 
 impl Error for WebRTCError {}
-
-/// Check if WebRTC feature is available
-#[allow(dead_code)]
-pub fn is_available() -> bool {
-    cfg!(feature = "webrtc-streaming")
-}

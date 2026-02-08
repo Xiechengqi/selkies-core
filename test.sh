@@ -33,7 +33,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --mode MODE    Test mode: all (default), unit, integration, websocket"
+            echo "  --mode MODE    Test mode: all (default), unit, integration"
             echo "  --verbose      Enable verbose output"
             echo "  --help         Show this help message"
             exit 0
@@ -68,10 +68,6 @@ case $TEST_MODE in
     integration)
         echo -e "${GREEN}Running integration tests${NC}"
         TEST_CMD="$TEST_CMD --test '*'"
-        ;;
-    websocket)
-        echo -e "${YELLOW}Running WebSocket-only tests${NC}"
-        TEST_CMD="$TEST_CMD --no-default-features --features websocket-legacy"
         ;;
     *)
         echo -e "${RED}Unknown test mode: $TEST_MODE${NC}"

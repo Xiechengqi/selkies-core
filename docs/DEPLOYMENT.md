@@ -7,9 +7,8 @@ This document describes how to deploy selkies-core on a Linux host system.
 - Linux (X11-based desktop)
 - Xvfb or X.org installed
 - Rust 1.70+ toolchain
-- libjpeg-turbo development files
 - X11 development files
-- **GStreamer 1.0+** (required for WebRTC mode)
+- **GStreamer 1.0+**
 - **Hardware encoder drivers** (optional, for hardware acceleration)
 
 ## Dependencies
@@ -23,7 +22,6 @@ sudo apt-get update
 sudo apt-get install -y \
     build-essential \
     pkg-config \
-    libjpeg-turbo8-dev \
     libx11-dev \
     libxcb1-dev \
     libxkbcommon-dev \
@@ -31,7 +29,7 @@ sudo apt-get install -y \
     openbox
 ```
 
-#### GStreamer 依赖（WebRTC 模式必需）
+#### GStreamer 依赖
 
 ```bash
 sudo apt-get install -y \
@@ -64,7 +62,6 @@ sudo apt-get install -y libpulse-dev libopus-dev libasound2-dev
 sudo dnf install -y \
     gcc \
     pkg-config \
-    libjpeg-turbo-devel \
     libX11-devel \
     libxcb-devel \
     libxkbcommon-devel \
@@ -80,7 +77,6 @@ sudo dnf install -y \
 ```bash
 sudo pacman -S --needed \
     base-devel \
-    libjpeg-turbo \
     libx11 \
     libxcb \
     xcb-util \
@@ -93,17 +89,9 @@ sudo pacman -S --needed \
 
 ## Building
 
-### WebRTC 模式（默认）
-
 ```bash
 cd /app/projects/selkies-core
 cargo build --release
-```
-
-### WebSocket 备用模式（无需 GStreamer）
-
-```bash
-cargo build --release --no-default-features --features websocket-legacy
 ```
 
 ### 带硬件加速
@@ -156,17 +144,12 @@ display = ":0"
 width = 0                   # 0 = auto-detect
 height = 0                  # 0 = auto-detect
 
-[websocket]
-host = "0.0.0.0"
-port = 8080
-
 [http]
 port = 8000
 
 [encoding]
 target_fps = 30
-jpeg_quality = 80
-stripe_height = 16
+max_fps = 60
 ```
 
 ### WebRTC 配置
@@ -257,7 +240,7 @@ Update systemd service to run as `selkies` user.
 
 ## Docker Deployment
 
-### Dockerfile (WebRTC 模式)
+### Dockerfile
 
 ```dockerfile
 FROM rust:1.70 AS builder
@@ -265,7 +248,6 @@ FROM rust:1.70 AS builder
 RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
-    libjpeg-turbo8-dev \
     libx11-dev \
     libxcb1-dev \
     libxkbcommon-dev \
@@ -281,7 +263,6 @@ FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y \
     xvfb \
     openbox \
-    libjpeg-turbo8 \
     libx11-6 \
     libxcb1 \
     gstreamer1.0-tools \
@@ -295,7 +276,7 @@ RUN apt-get update && apt-get install -y \
 COPY --from=builder /app/target/release/selkies-core /usr/local/bin/
 COPY config.example.toml /etc/selkies-core.toml
 
-EXPOSE 8000 8080
+EXPOSE 8000
 
 CMD ["selkies-core", "--config", "/etc/selkies-core.toml"]
 ```
@@ -309,10 +290,10 @@ Check if the server is running:
 ps aux | grep selkies-core
 
 # Check ports
-ss -tlnp | grep 808
+ss -tlnp | grep 8000
 
 # Health check
-curl http://localhost:8081/health
+curl http://localhost:8000/health
 ```
 
 ## Troubleshooting
@@ -376,7 +357,6 @@ hardware_encoder = "software"
 ### Poor Performance
 
 - Reduce target FPS
-- Increase stripe height
 - Lower video bitrate
 - Use hardware acceleration
 
@@ -385,5 +365,4 @@ hardware_encoder = "software"
 | Port | Protocol | Description |
 |------|----------|-------------|
 | 8000 | HTTP | Web UI, health checks, WebRTC signaling |
-| 8080 | WebSocket | WebSocket streaming (legacy mode) |
 | UDP  | WebRTC | RTP media transport (dynamic ports) |

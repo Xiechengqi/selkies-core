@@ -1,4 +1,4 @@
-.PHONY: help build build-release build-websocket test clean install check fmt clippy
+.PHONY: help build build-release test clean install check fmt clippy
 
 # Default target
 help:
@@ -7,7 +7,6 @@ help:
 	@echo "Available targets:"
 	@echo "  make build           - Build in debug mode (WebRTC)"
 	@echo "  make build-release   - Build in release mode (WebRTC)"
-	@echo "  make build-websocket - Build WebSocket-only mode"
 	@echo "  make build-vaapi     - Build with VA-API support"
 	@echo "  make build-nvenc     - Build with NVENC support"
 	@echo "  make test            - Run all tests"
@@ -24,9 +23,6 @@ build:
 build-release:
 	cargo build --release
 
-build-websocket:
-	cargo build --release --no-default-features --features websocket-legacy
-
 build-vaapi:
 	cargo build --release --features vaapi
 
@@ -39,9 +35,6 @@ build-qsv:
 # Test targets
 test:
 	cargo test
-
-test-websocket:
-	cargo test --no-default-features --features websocket-legacy
 
 # Code quality
 check:

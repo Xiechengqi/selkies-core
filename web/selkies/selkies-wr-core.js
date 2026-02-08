@@ -167,10 +167,6 @@ export default function webrtc() {
 	let windowResolution = "";
 	let encoderLabel = "";
 	let encoder = ""
-	let gamepad = {
-			gamepadState: 'disconnected',
-			gamepadName: 'none',
-	};
 
 	let connectionStat = {
 		connectionStatType: "unknown",
@@ -206,7 +202,6 @@ export default function webrtc() {
 	let manualWidth, manualHeight = 0;
 	window.isManualResolutionMode = false;
 	window.fps = 0;
-	let isGamepadEnabled = false;
 
 	var videoConnected = "";
 	var audioConnected = "";
@@ -1121,8 +1116,6 @@ export default function webrtc() {
 			setIntParam('audio_bitrate', audioBitRate);
 			window.isManualResolutionMode = getBoolParam('is_manual_resolution_mode', false);
 			setBoolParam('is_manual_resolution_mode', window.isManualResolutionMode);
-			isGamepadEnabled = getBoolParam('gamepad_enabled', true);
-			setBoolParam('gamepad_enabled', isGamepadEnabled);
 			manualWidth = getIntParam('manual_width', null);
 			setIntParam('manual_width', manualWidth);
 			manualHeight = getIntParam('manual_height', null);
@@ -1219,18 +1212,6 @@ export default function webrtc() {
 
 			webrtc.ondatachannelopen = () => {
 				console.log("Data channel opened");
-				// Bind gamepad connected handler.
-				input.ongamepadconnected = (gamepad_id) => {
-					webrtc._setStatus('Gamepad connected: ' + gamepad_id);
-					gamepad = {gamepadState: "connected", gamepadName: gamepad_id};
-				}
-
-				// Bind gamepad disconnect handler.
-				input.ongamepaddisconnected = () => {
-					webrtc._setStatus('Gamepad disconnected: ' + gamepad_id);
-					gamepad = {gamepadState: "disconnected", gamepadName: "none"};
-				}
-
 				// Bind input handlers.
 				input.attach();
 				loadLastSessionSettings();
@@ -1421,10 +1402,6 @@ export default function webrtc() {
 			windowResolution = "";
 			encoderLabel = "";
 			encoder = ""
-			gamepad = {
-					gamepadState: 'disconnected',
-					gamepadName: 'none',
-			};
 			connectionStat = {
 					connectionStatType: "unknown",
 					connectionLatency: 0,
@@ -1454,7 +1431,6 @@ export default function webrtc() {
 			rdelta = 500;
 			rtimeout = false;
 			manualWidth, manualHeight = 0;
-			isGamepadEnabled = false;
 			videoConnected = "";
 			audioConnected = "";
 			statWatchEnabled = false;

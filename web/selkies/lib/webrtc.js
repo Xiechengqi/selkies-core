@@ -643,15 +643,6 @@ export class WebRTCDemo {
 	}
 
 	/**
-	 * Handler for gamepad disconnect message.
-	 *
-	 * @param {number} gp_num - the gamepad number
-	 */
-	onGamepadDisconnect(gp_num) {
-		this._setStatus("gamepad: " + gp_num + ", disconnected");
-	}
-
-	/**
 	 * Gets connection stats. returns new promise.
 	 */
 	getConnectionStats() {

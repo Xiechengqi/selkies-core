@@ -332,6 +332,24 @@ impl VideoPipeline {
         }
     }
 
+    /// Update keyframe interval dynamically (best-effort)
+    pub fn set_keyframe_interval(&self, interval: u32) {
+        if let Some(encoder) = self.pipeline.by_name("encoder") {
+            if encoder.has_property("key-int-max", None) {
+                let _ = encoder.set_property("key-int-max", interval as i32);
+            } else if encoder.has_property("gop-size", None) {
+                let _ = encoder.set_property("gop-size", interval as i32);
+            } else if encoder.has_property("keyframe-max-dist", None) {
+                let _ = encoder.set_property("keyframe-max-dist", interval as i32);
+            } else if encoder.has_property("keyframe-period", None) {
+                let _ = encoder.set_property("keyframe-period", interval as i32);
+            } else if encoder.has_property("iframeinterval", None) {
+                let _ = encoder.set_property("iframeinterval", interval as i32);
+            }
+            debug!("Updated encoder keyframe interval to {} frames", interval);
+        }
+    }
+
     /// Get frame count
     pub fn frame_count(&self) -> u64 {
         self.frame_count.load(Ordering::Relaxed)

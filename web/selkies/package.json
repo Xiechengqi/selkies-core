@@ -9,7 +9,6 @@
   "scripts": {
     "serve": "vite",
     "build": "vite build",
-    "postbuild": "node gendb.js",
     "preview": "vite preview"
   },
   "author": "Selkies",

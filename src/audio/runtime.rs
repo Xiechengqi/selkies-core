@@ -15,6 +15,16 @@ pub struct AudioConfig {
     pub bitrate: u32,
 }
 
+impl AudioConfig {
+    pub fn with_bitrate(&self, bitrate: u32) -> Self {
+        Self {
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+            bitrate,
+        }
+    }
+}
+
 /// Encoded audio packet
 #[derive(Debug, Clone)]
 pub struct AudioPacket {

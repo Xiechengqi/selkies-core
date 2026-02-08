@@ -5,11 +5,21 @@
 #![allow(dead_code)]
 
 use super::WebRTCError;
+use base64::Engine;
 use crate::config::{WebRTCConfig, VideoCodec};
+use hmac::{Hmac, Mac};
+use sha1::Sha1;
+use webrtc::ice::udp_mux::{UDPMuxDefault, UDPMuxParams};
+use webrtc::ice::udp_network::{EphemeralUDP, UDPNetwork};
+use log::warn;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::UdpSocket;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264, MIME_TYPE_VP8, MIME_TYPE_VP9};
 use webrtc::api::APIBuilder;
+use webrtc::api::setting_engine::SettingEngine;
+use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
@@ -42,6 +52,38 @@ impl PeerConnectionManager {
 
     /// Create a new PeerConnection with the configured settings
     pub async fn create_peer_connection(&self) -> Result<Arc<RTCPeerConnection>, WebRTCError> {
+        let mut setting_engine = SettingEngine::default();
+
+        let mut nat1to1_ips = self.config.nat1to1_ips.clone();
+        if nat1to1_ips.is_empty() && !self.config.ip_retrieval_url.is_empty() {
+            if let Some(ip) = fetch_external_ip(&self.config.ip_retrieval_url) {
+                nat1to1_ips.push(ip);
+            }
+        }
+        if !nat1to1_ips.is_empty() {
+            setting_engine.set_nat_1to1_ips(nat1to1_ips, RTCIceCandidateType::Host);
+        }
+
+        if self.config.udp_mux_port != 0 {
+            if self.config.ephemeral_udp_port_range.is_some() {
+                warn!("UDP mux is enabled; ignoring ephemeral UDP port range");
+            }
+            let addr = format!("0.0.0.0:{}", self.config.udp_mux_port);
+            let socket = UdpSocket::bind(&addr)
+                .await
+                .map_err(|e| WebRTCError::ConnectionFailed(format!("Failed to bind UDP mux socket {}: {}", addr, e)))?;
+            let udp_mux = UDPMuxDefault::new(UDPMuxParams::new(socket));
+            setting_engine.set_udp_network(UDPNetwork::Muxed(udp_mux));
+        } else if let Some(range) = self.config.ephemeral_udp_port_range {
+            let ephemeral = EphemeralUDP::new(range[0], range[1])
+                .map_err(|e| WebRTCError::ConnectionFailed(format!("Invalid ICE UDP port range: {}", e)))?;
+            setting_engine.set_udp_network(UDPNetwork::Ephemeral(ephemeral));
+        }
+
+        if self.config.tcp_mux_port != 0 {
+            warn!("TCP mux port is configured but webrtc-rs does not expose TCP mux wiring");
+        }
+
         // Create media engine with codec support
         let mut media_engine = MediaEngine::default();
 
@@ -57,10 +99,12 @@ impl PeerConnectionManager {
         let api = APIBuilder::new()
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
+            .with_setting_engine(setting_engine)
             .build();
 
         // Convert ICE servers configuration
-        let ice_servers = self.config.ice_servers.iter().map(|server| {
+        let effective_ice_servers = build_ice_servers(&self.config);
+        let ice_servers = effective_ice_servers.iter().map(|server| {
             RTCIceServer {
                 urls: server.urls.clone(),
                 username: server.username.clone().unwrap_or_default(),
@@ -216,6 +260,7 @@ impl PeerConnectionManager {
     pub async fn handle_offer(
         peer_connection: &Arc<RTCPeerConnection>,
         sdp: &str,
+        ice_trickle: bool,
     ) -> Result<String, WebRTCError> {
         let offer = RTCSessionDescription::offer(sdp.to_string())
             .map_err(|e| WebRTCError::SdpError(format!("Invalid SDP offer: {}", e)))?;
@@ -226,8 +271,21 @@ impl PeerConnectionManager {
         let answer = peer_connection.create_answer(None).await
             .map_err(|e| WebRTCError::SdpError(format!("Failed to create answer: {}", e)))?;
 
+        let mut gather_complete = peer_connection.gathering_complete_promise().await;
+
         peer_connection.set_local_description(answer.clone()).await
             .map_err(|e| WebRTCError::SdpError(format!("Failed to set local description: {}", e)))?;
+
+        if !ice_trickle {
+            let _ = gather_complete.recv().await;
+            if let Some(local_desc) = peer_connection.local_description().await {
+                return Ok(local_desc.sdp);
+            }
+        }
+
+        if let Some(local_desc) = peer_connection.local_description().await {
+            return Ok(local_desc.sdp);
+        }
 
         Ok(answer.sdp)
     }
@@ -279,6 +337,89 @@ impl PeerConnectionManager {
             .map_err(|e| WebRTCError::ConnectionFailed(format!("Failed to close connection: {}", e)))?;
         Ok(())
     }
+}
+
+fn fetch_external_ip(url: &str) -> Option<String> {
+    let response = ureq::get(url)
+        .timeout(Duration::from_secs(3))
+        .call()
+        .ok()?;
+    let body = response.into_string().ok()?;
+    let ip = body.trim();
+    if ip.is_empty() {
+        None
+    } else {
+        Some(ip.to_string())
+    }
+}
+
+fn build_ice_servers(config: &WebRTCConfig) -> Vec<crate::config::IceServerConfig> {
+    let mut servers = Vec::new();
+
+    let has_turn = !config.turn_host.is_empty()
+        || !config.turn_shared_secret.is_empty()
+        || !config.turn_username.is_empty()
+        || !config.turn_password.is_empty();
+    let has_stun = !config.stun_host.is_empty() && config.stun_port != 0;
+
+    if has_stun {
+        servers.push(crate::config::IceServerConfig {
+            urls: vec![format!("stun:{}:{}", config.stun_host, config.stun_port)],
+            username: None,
+            credential: None,
+        });
+    }
+
+    if has_turn && !config.turn_host.is_empty() {
+        let scheme = if config.turn_tls { "turns" } else { "turn" };
+        let transport = if config.turn_protocol.is_empty() {
+            "udp"
+        } else {
+            config.turn_protocol.as_str()
+        };
+        let url = format!(
+            "{}:{}:{}?transport={}",
+            scheme,
+            config.turn_host,
+            config.turn_port,
+            transport
+        );
+
+        let (username, credential) = if !config.turn_shared_secret.is_empty() {
+            let ttl_secs: u64 = 24 * 60 * 60;
+            let expiry = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() + ttl_secs)
+                .unwrap_or(ttl_secs);
+            let user = format!("{}:selkies", expiry);
+            let password = hmac_sha1_base64(&config.turn_shared_secret, &user);
+            (Some(user), Some(password))
+        } else if !config.turn_username.is_empty() && !config.turn_password.is_empty() {
+            (Some(config.turn_username.clone()), Some(config.turn_password.clone()))
+        } else {
+            (None, None)
+        };
+
+        servers.push(crate::config::IceServerConfig {
+            urls: vec![url],
+            username,
+            credential,
+        });
+    }
+
+    if servers.is_empty() {
+        return config.ice_servers.clone();
+    }
+
+    servers
+}
+
+fn hmac_sha1_base64(secret: &str, message: &str) -> String {
+    let mut mac = Hmac::<Sha1>::new_from_slice(secret.as_bytes())
+        .unwrap_or_else(|_| Hmac::<Sha1>::new_from_slice(&[]).unwrap());
+    mac.update(message.as_bytes());
+    let result = mac.finalize().into_bytes();
+    base64::engine::general_purpose::STANDARD.encode(result)
 }
 
 #[cfg(test)]

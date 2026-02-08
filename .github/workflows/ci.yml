@@ -34,14 +34,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libjpeg-turbo8-dev \
             libx11-dev \
             libxcb1-dev \
-            libxkbcommon-dev
+            libxkbcommon-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
       - uses: actions-rs/cargo@v1
         with:
           command: check
-          args: --no-default-features --features websocket-legacy
 
   test:
     name: Test Suite
@@ -67,11 +67,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libjpeg-turbo8-dev \
             libx11-dev \
             libxcb1-dev \
-            libxkbcommon-dev
+            libxkbcommon-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
       - uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --no-default-features --features websocket-legacy

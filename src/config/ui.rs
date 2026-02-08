@@ -31,7 +31,6 @@ pub struct UiVisibility {
 pub struct UiVideo {
     pub encoder: UiEnum,
     pub framerate: UiRangeU32,
-    pub jpeg_quality: UiRangeU32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -103,12 +102,6 @@ impl UiConfig {
             1,
             config.encoding.max_fps.max(1),
         );
-        let jpeg_quality = env_range_u32(
-            "SELKIES_JPEG_QUALITY",
-            config.encoding.jpeg_quality as u32,
-            1,
-            100,
-        );
 
         let (manual_resolution, width, height) = env_manual_resolution(
             config.display.width,
@@ -134,7 +127,6 @@ impl UiConfig {
             video: UiVideo {
                 encoder,
                 framerate,
-                jpeg_quality,
             },
             screen: UiScreen {
                 manual_resolution,

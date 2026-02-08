@@ -38,37 +38,6 @@ pub fn get_embedded_file(path: &str) -> Response {
     }
 }
 
-/// Get index.html with WebSocket port injection
-pub fn get_index_html_with_port(ws_port: u16) -> Response {
-    match WebAssets::get("index.html") {
-        Some(content) => {
-            let html = match std::str::from_utf8(&content.data) {
-                Ok(s) => s.to_string(),
-                Err(_) => {
-                    return Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(Body::from("Invalid UTF-8 in index.html"))
-                        .unwrap()
-                }
-            };
-
-            // Inject WebSocket port
-            let html = html.replace("__SELKIES_INJECTED_PORT__", &ws_port.to_string());
-
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-                .header(header::CACHE_CONTROL, "no-store, max-age=0")
-                .body(Body::from(html))
-                .unwrap()
-        }
-        None => Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::from("index.html not found"))
-            .unwrap(),
-    }
-}
-
 /// Check if embedded assets are available
 pub fn has_embedded_assets() -> bool {
     WebAssets::get("index.html").is_some()
@@ -83,16 +52,12 @@ pub fn list_embedded_files() -> Vec<String> {
 /// Determine cache control header based on file type
 fn cache_control_for_path(path: &str) -> &'static str {
     if path == "index.html" {
-        // Never cache index.html to ensure fresh content
         "no-store, max-age=0"
     } else if path.ends_with(".js") || path.ends_with(".css") {
-        // Cache JS/CSS for 1 year (they have hashed filenames)
         "public, max-age=31536000, immutable"
     } else if path.ends_with(".woff2") || path.ends_with(".woff") || path.ends_with(".ttf") {
-        // Cache fonts for 1 year
         "public, max-age=31536000, immutable"
     } else {
-        // Default: cache for 1 hour
         "public, max-age=3600"
     }
 }

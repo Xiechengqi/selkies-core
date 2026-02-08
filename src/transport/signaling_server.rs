@@ -5,11 +5,9 @@
 
 #![allow(dead_code)]
 
-#[cfg(feature = "webrtc-streaming")]
 use crate::webrtc::{
     SignalingMessage, SessionManager,
 };
-#[cfg(feature = "webrtc-streaming")]
 use crate::webrtc::signaling::SignalingParser;
 use crate::web::SharedState;
 use axum::extract::ws::{Message, WebSocket};
@@ -40,10 +38,9 @@ impl Default for SignalingConfig {
 }
 
 /// Handle a WebRTC signaling WebSocket connection
-#[cfg(feature = "webrtc-streaming")]
 pub async fn handle_signaling_connection(
     socket: WebSocket,
-    _state: Arc<SharedState>,
+    state: Arc<SharedState>,
     session_manager: Arc<SessionManager>,
 ) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
@@ -73,6 +70,7 @@ pub async fn handle_signaling_connection(
                         if let Some(response) = handle_signaling_message(
                             msg,
                             &mut session_id,
+                            &state,
                             &session_manager,
                             &tx,
                         ).await {
@@ -123,10 +121,10 @@ pub async fn handle_signaling_connection(
 }
 
 /// Handle a single signaling message
-#[cfg(feature = "webrtc-streaming")]
 async fn handle_signaling_message(
     message: SignalingMessage,
     session_id: &mut Option<String>,
+    state: &Arc<SharedState>,
     session_manager: &Arc<SessionManager>,
     tx: &mpsc::UnboundedSender<String>,
 ) -> Option<String> {
@@ -170,34 +168,39 @@ async fn handle_signaling_message(
                 Ok(answer_sdp) => {
                     let answer = SignalingMessage::answer(answer_sdp, session.id.clone());
 
-                    // Set up ICE candidate forwarding
-                    let tx_clone = tx.clone();
-                    let session_id_clone = session.id.clone();
+                    if session_manager.config().ice_trickle {
+                        // Set up ICE candidate forwarding
+                        let tx_clone = tx.clone();
+                        let session_id_clone = session.id.clone();
+                        let state_clone = state.clone();
 
-                    crate::webrtc::peer_connection::PeerConnectionManager::setup_ice_callback(
-                        &session.peer_connection,
-                        move |candidate_opt| {
-                            if let Some(candidate) = candidate_opt {
-                                let msg = SignalingMessage::ice_candidate(
-                                    candidate,
-                                    Some("0".to_string()),
-                                    Some(0),
-                                    session_id_clone.clone(),
-                                );
-                                if let Ok(json) = msg.to_json() {
-                                    let _ = tx_clone.send(json);
+                        crate::webrtc::peer_connection::PeerConnectionManager::setup_ice_callback(
+                            &session.peer_connection,
+                            move |candidate_opt| {
+                                if let Some(candidate) = candidate_opt {
+                                    let (transport, candidate_type) = parse_ice_candidate(&candidate);
+                                    state_clone.record_ice_candidate(transport.as_deref(), candidate_type.as_deref());
+                                    let msg = SignalingMessage::ice_candidate(
+                                        candidate,
+                                        Some("0".to_string()),
+                                        Some(0),
+                                        session_id_clone.clone(),
+                                    );
+                                    if let Ok(json) = msg.to_json() {
+                                        let _ = tx_clone.send(json);
+                                    }
+                                } else {
+                                    // ICE gathering complete
+                                    let msg = SignalingMessage::IceComplete {
+                                        session_id: session_id_clone.clone(),
+                                    };
+                                    if let Ok(json) = msg.to_json() {
+                                        let _ = tx_clone.send(json);
+                                    }
                                 }
-                            } else {
-                                // ICE gathering complete
-                                let msg = SignalingMessage::IceComplete {
-                                    session_id: session_id_clone.clone(),
-                                };
-                                if let Ok(json) = msg.to_json() {
-                                    let _ = tx_clone.send(json);
-                                }
-                            }
-                        },
-                    ).await;
+                            },
+                        ).await;
+                    }
 
                     // Send ready notification
                     let ready = SignalingMessage::ready(
@@ -240,14 +243,14 @@ async fn handle_signaling_message(
         SignalingMessage::KeyframeRequest { session_id: msg_session_id } => {
             let target_session_id = session_id.clone().unwrap_or(msg_session_id);
             debug!("Keyframe requested for session {}", target_session_id);
-            // TODO: Request keyframe from GStreamer pipeline
+            state.runtime_settings.request_keyframe();
             None
         }
 
         SignalingMessage::BitrateRequest { session_id: msg_session_id, bitrate_kbps } => {
             let target_session_id = session_id.clone().unwrap_or(msg_session_id);
             debug!("Bitrate change requested for session {}: {} kbps", target_session_id, bitrate_kbps);
-            // TODO: Update GStreamer encoder bitrate
+            state.runtime_settings.set_video_bitrate_kbps(bitrate_kbps);
             None
         }
 
@@ -271,17 +274,22 @@ async fn handle_signaling_message(
     }
 }
 
-/// Stub handler for when WebRTC feature is not enabled
-#[cfg(not(feature = "webrtc-streaming"))]
-pub async fn handle_signaling_connection(
-    mut socket: WebSocket,
-    _state: Arc<SharedState>,
-) {
-    use futures::SinkExt;
+fn parse_ice_candidate(candidate: &str) -> (Option<String>, Option<String>) {
+    let parts: Vec<&str> = candidate.split_whitespace().collect();
+    if parts.len() < 8 {
+        return (None, None);
+    }
 
-    let error_msg = r#"{"type":"error","code":"FEATURE_DISABLED","message":"WebRTC streaming is not enabled"}"#;
-    let _ = socket.send(Message::Text(error_msg.into())).await;
-    let _ = socket.close().await;
+    // candidate:<foundation> <component> <transport> <priority> <ip> <port> typ <type> ...
+    let transport = parts.get(2).map(|v| v.to_ascii_lowercase());
+    let mut candidate_type = None;
+    if let Some(idx) = parts.iter().position(|p| *p == "typ") {
+        if let Some(typ) = parts.get(idx + 1) {
+            candidate_type = Some(typ.to_ascii_lowercase());
+        }
+    }
+
+    (transport, candidate_type)
 }
 
 #[cfg(test)]

@@ -1,81 +1,29 @@
 //! Shared state for selkies-core
 //!
-//! Manages client connections, shared configuration, and WebRTC sessions.
+//! Manages shared configuration and WebRTC sessions.
 
 #![allow(dead_code)]
 
 use crate::config::Config;
 use crate::config::ui::UiConfig;
 use crate::audio::AudioPacket;
-use crate::encode::Stripe;
-use crate::input::{InputEvent, InputEventData};
+use xxhash_rust::xxh64::xxh64;
+use crate::input::InputEventData;
+use crate::runtime_settings::RuntimeSettings;
 use base64::Engine;
-use log::{debug, info};
-use std::collections::HashMap;
-use std::net::SocketAddr;
+use log::{info, warn};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
-use uuid::Uuid;
 
-
-/// Client connection information
-#[derive(Debug, Clone)]
-pub struct ClientInfo {
-    /// Unique client ID
-    pub id: String,
-
-    /// Client address
-    pub address: SocketAddr,
-
-    /// Connected at
-    pub connected_at: std::time::Instant,
-}
-
-impl ClientInfo {
-    /// Create a new client info
-    pub fn new(address: SocketAddr) -> Self {
-        Self {
-            id: Uuid::new_v4().to_string(),
-            address,
-            connected_at: std::time::Instant::now(),
-        }
-    }
-}
-
-/// Streaming mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamingMode {
-    /// WebRTC with GStreamer (low-latency)
-    WebRTC,
-    /// Legacy WebSocket with JPEG stripes
-    WebSocket,
-    /// Hybrid mode (WebRTC preferred, WebSocket fallback)
-    Hybrid,
-}
-
-impl Default for StreamingMode {
-    fn default() -> Self {
-        #[cfg(feature = "webrtc-streaming")]
-        return StreamingMode::Hybrid;
-
-        #[cfg(not(feature = "webrtc-streaming"))]
-        return StreamingMode::WebSocket;
-    }
-}
 
 /// Shared state for the application
 #[derive(Clone)]
 pub struct SharedState {
     /// Configuration
     pub config: Arc<Config>,
-
-    /// Connected clients (WebSocket)
-    pub clients: Arc<Mutex<HashMap<String, ClientInfo>>>,
-
-    /// Frame broadcast sender (for WebSocket/JPEG mode)
-    pub frame_sender: broadcast::Sender<Vec<Stripe>>,
 
     /// RTP packet broadcast sender (for WebRTC mode)
     pub rtp_sender: broadcast::Sender<Vec<u8>>,
@@ -95,9 +43,6 @@ pub struct SharedState {
     /// Clipboard content (base64 text)
     pub clipboard: Arc<Mutex<Option<String>>>,
 
-    /// Force full refresh flag
-    pub force_refresh: Arc<AtomicBool>,
-
     /// Request keyframe flag (for WebRTC)
     pub force_keyframe: Arc<AtomicBool>,
 
@@ -110,35 +55,29 @@ pub struct SharedState {
     /// Server start time
     pub start_time: std::time::Instant,
 
-    /// Total connections
-    pub total_connections: Arc<Mutex<u64>>,
-
     /// Last cursor message payload
     pub last_cursor_message: Arc<Mutex<Option<String>>>,
-
-    /// Per-client mouse button mask state
-    pub client_button_masks: Arc<Mutex<HashMap<String, u8>>>,
-
-    /// Per-client last mouse position
-    pub client_mouse_positions: Arc<Mutex<HashMap<String, (i32, i32)>>>,
-
-    /// Current streaming mode
-    pub streaming_mode: Arc<Mutex<StreamingMode>>,
 
     /// WebRTC session count
     pub webrtc_session_count: Arc<AtomicU64>,
 
-    /// WebSocket client count
-    pub websocket_client_count: Arc<AtomicU64>,
+    /// Runtime settings updated from client
+    pub runtime_settings: Arc<RuntimeSettings>,
+
+    /// Last received WebRTC stats (raw JSON)
+    pub last_webrtc_stats_video: Arc<Mutex<Option<String>>>,
+    pub last_webrtc_stats_audio: Arc<Mutex<Option<String>>>,
+
+    /// Last clipboard hash written by server (to suppress echo)
+    pub last_clipboard_write_hash: Arc<Mutex<Option<u64>>>,
 }
 
 impl std::fmt::Debug for SharedState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SharedState")
             .field("config", &self.config)
-            .field("clients_count", &self.clients.lock().map(|c| c.len()).unwrap_or(0))
             .field("display_size", &self.display_size)
-            .field("streaming_mode", &self.streaming_mode)
+            .field("webrtc_sessions", &self.webrtc_sessions())
             .finish()
     }
 }
@@ -149,114 +88,81 @@ impl SharedState {
         config: Config,
         ui_config: UiConfig,
         input_sender: mpsc::UnboundedSender<InputEventData>,
+        runtime_settings: Arc<RuntimeSettings>,
     ) -> Self {
-        let (frame_sender, _) = broadcast::channel(100);
-        let (rtp_sender, _) = broadcast::channel(500);  // More capacity for RTP packets
+        let (rtp_sender, _) = broadcast::channel(500);
         let (audio_sender, _) = broadcast::channel(100);
         let (text_sender, _) = broadcast::channel(100);
         let display_size = Arc::new(Mutex::new((config.display.width, config.display.height)));
 
-        // Determine initial streaming mode
-        let streaming_mode = if config.webrtc.enabled {
-            StreamingMode::Hybrid
-        } else {
-            StreamingMode::WebSocket
-        };
-
         Self {
             config: Arc::new(config),
             ui_config: Arc::new(ui_config),
-            clients: Arc::new(Mutex::new(HashMap::new())),
-            frame_sender,
             rtp_sender,
             audio_sender,
             text_sender,
             input_sender,
             display_size,
             clipboard: Arc::new(Mutex::new(None)),
-            force_refresh: Arc::new(AtomicBool::new(false)),
             force_keyframe: Arc::new(AtomicBool::new(false)),
             stats: Arc::new(Mutex::new(RuntimeStats::default())),
             start_time: std::time::Instant::now(),
-            total_connections: Arc::new(Mutex::new(0)),
-            client_button_masks: Arc::new(Mutex::new(HashMap::new())),
-            client_mouse_positions: Arc::new(Mutex::new(HashMap::new())),
             last_cursor_message: Arc::new(Mutex::new(None)),
-            streaming_mode: Arc::new(Mutex::new(streaming_mode)),
             webrtc_session_count: Arc::new(AtomicU64::new(0)),
-            websocket_client_count: Arc::new(AtomicU64::new(0)),
+            runtime_settings,
+            last_webrtc_stats_video: Arc::new(Mutex::new(None)),
+            last_webrtc_stats_audio: Arc::new(Mutex::new(None)),
+            last_clipboard_write_hash: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// Add a new client
-    pub fn add_client(&self, address: SocketAddr) -> String {
-        let mut clients = self.clients.lock().unwrap();
-        let mut total = self.total_connections.lock().unwrap();
-        *total += 1;
-
-        let client = ClientInfo::new(address);
-        let id = client.id.clone();
-        clients.insert(id.clone(), client);
-        self.client_button_masks.lock().unwrap().insert(id.clone(), 0);
-        self.client_mouse_positions.lock().unwrap().insert(id.clone(), (0, 0));
-
-        info!("Client connected: {} (total: {})", id, *total);
-        id
+    pub fn update_webrtc_stats(&self, kind: &str, payload: &str) {
+        match kind {
+            "video" => {
+                let mut last = self.last_webrtc_stats_video.lock().unwrap();
+                *last = Some(payload.to_string());
+            }
+            "audio" => {
+                let mut last = self.last_webrtc_stats_audio.lock().unwrap();
+                *last = Some(payload.to_string());
+            }
+            _ => {}
+        }
     }
 
-    /// Remove a client
-    pub fn remove_client(&self, client_id: &str) {
-        let mut clients = self.clients.lock().unwrap();
-        clients.remove(client_id);
-        self.client_button_masks.lock().unwrap().remove(client_id);
-        self.client_mouse_positions.lock().unwrap().remove(client_id);
-        info!("Client disconnected: {}", client_id);
+    pub fn handle_command_message(&self, message: &str) -> bool {
+        if !message.starts_with("cmd,") {
+            return false;
+        }
+        if !self.config.input.enable_commands {
+            warn!("Command execution disabled; ignoring cmd request");
+            return true;
+        }
+        let cmd = message.trim_start_matches("cmd,").trim();
+        if cmd.is_empty() {
+            warn!("Received empty cmd request");
+            return true;
+        }
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        match Command::new("sh")
+            .arg("-lc")
+            .arg(cmd)
+            .current_dir(home)
+            .spawn()
+        {
+            Ok(_) => info!("Launched command: {}", cmd),
+            Err(err) => warn!("Failed to launch command '{}': {}", cmd, err),
+        }
+        true
     }
 
-    /// Get all clients
-    pub fn get_all_clients(&self) -> Vec<ClientInfo> {
-        let clients = self.clients.lock().unwrap();
-        clients.values().cloned().collect()
-    }
-
-    /// Inject mouse move
-    pub fn inject_mouse_move(&self, _client_id: &str, x: i32, y: i32) {
-        debug!("Mouse move: ({}, {})", x, y);
-        let mut event = InputEventData::default();
-        event.event_type = InputEvent::MouseMove;
-        event.mouse_x = x;
-        event.mouse_y = y;
-        let _ = self.input_sender.send(event);
-    }
-
-    /// Inject mouse button
-    pub fn inject_mouse_button(&self, _client_id: &str, button: u8, pressed: bool) {
-        debug!("Mouse button: {} = {}", button, pressed);
-        let mut event = InputEventData::default();
-        event.event_type = InputEvent::MouseButton;
-        event.mouse_button = button;
-        event.button_pressed = pressed;
-        let _ = self.input_sender.send(event);
-    }
-
-    /// Inject mouse wheel
-    pub fn inject_mouse_wheel(&self, _client_id: &str, dx: i16, dy: i16) {
-        debug!("Mouse wheel: ({}, {})", dx, dy);
-        let mut event = InputEventData::default();
-        event.event_type = InputEvent::MouseWheel;
-        event.wheel_delta_x = dx;
-        event.wheel_delta_y = dy;
-        let _ = self.input_sender.send(event);
-    }
-
-    /// Inject keyboard
-    pub fn inject_keyboard(&self, _client_id: &str, keysym: u32, pressed: bool) {
-        debug!("Keyboard: keysym=0x{:x} pressed={}", keysym, pressed);
-        let mut event = InputEventData::default();
-        event.event_type = InputEvent::Keyboard;
-        event.keysym = keysym;
-        event.key_pressed = pressed;
-        let _ = self.input_sender.send(event);
+    pub fn handle_settings_message(&self, message: &str) -> bool {
+        if !message.starts_with("SETTINGS,") {
+            return false;
+        }
+        let payload = message.trim_start_matches("SETTINGS,");
+        self.runtime_settings.apply_settings_json(payload);
+        true
     }
 
     pub fn update_cursor_message(&self, message: String) {
@@ -292,14 +198,37 @@ impl SharedState {
         let _ = self.text_sender.send(format!("clipboard,{}", base64_text));
     }
 
-    /// Request a full refresh from the capture loop
-    pub fn request_full_refresh(&self) {
-        self.force_refresh.store(true, Ordering::Relaxed);
+    /// Store binary clipboard and broadcast to clients
+    pub fn set_clipboard_binary(&self, mime_type: String, data: Vec<u8>) {
+        if data.len() > 8192 {
+            let _ = self
+                .text_sender
+                .send(format!("clipboard_start,{},{}", mime_type, data.len()));
+            for chunk in data.chunks(4096) {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+                let _ = self
+                    .text_sender
+                    .send(format!("clipboard_data,{}", encoded));
+            }
+            let _ = self.text_sender.send("clipboard_finish".to_string());
+            return;
+        }
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+        let _ = self
+            .text_sender
+            .send(format!("clipboard_binary,{},{}", mime_type, encoded));
     }
 
-    /// Consume refresh request flag
-    pub fn take_refresh_request(&self) -> bool {
-        self.force_refresh.swap(false, Ordering::Relaxed)
+    pub fn mark_clipboard_written(&self, mime_type: &str, data: &[u8]) {
+        let mut hash = xxh64(mime_type.as_bytes(), 0);
+        hash = xxh64(data, hash);
+        let mut last = self.last_clipboard_write_hash.lock().unwrap();
+        *last = Some(hash);
+    }
+
+    pub fn last_clipboard_hash(&self) -> Option<u64> {
+        *self.last_clipboard_write_hash.lock().unwrap()
     }
 
     /// Update display size from capture backend
@@ -311,15 +240,6 @@ impl SharedState {
     /// Get current display size
     pub fn display_size(&self) -> (u32, u32) {
         *self.display_size.lock().unwrap()
-    }
-
-    /// Update capture stats
-    pub fn update_capture_stats(&self, bytes: usize, fps: f64) {
-        let mut stats = self.stats.lock().unwrap();
-        stats.total_frames += 1;
-        stats.total_bytes += bytes as u64;
-        stats.fps = fps;
-        stats.bandwidth = (bytes as f64 * fps) as u64;
     }
 
     /// Update resource usage stats
@@ -335,17 +255,63 @@ impl SharedState {
         stats.latency_ms = latency_ms;
     }
 
+
+    /// Update client-reported latency metric (ms)
+    pub fn update_client_latency(&self, latency_ms: u64) {
+        let mut stats = self.stats.lock().unwrap();
+        stats.client_latency_ms = latency_ms;
+    }
+
+    /// Update client-reported FPS
+    pub fn update_client_fps(&self, fps: u32) {
+        let mut stats = self.stats.lock().unwrap();
+        stats.client_fps = fps;
+    }
+
+    /// Record an ICE candidate by transport and type
+    pub fn record_ice_candidate(&self, transport: Option<&str>, candidate_type: Option<&str>) {
+        let mut stats = self.stats.lock().unwrap();
+        stats.ice_candidates_total += 1;
+
+        if let Some(transport) = transport {
+            match transport {
+                "udp" => stats.ice_candidates_udp += 1,
+                "tcp" => stats.ice_candidates_tcp += 1,
+                _ => {}
+            }
+        }
+
+        if let Some(candidate_type) = candidate_type {
+            match candidate_type {
+                "host" => stats.ice_candidates_host += 1,
+                "srflx" => stats.ice_candidates_srflx += 1,
+                "relay" => stats.ice_candidates_relay += 1,
+                "prflx" => stats.ice_candidates_prflx += 1,
+                _ => {}
+            }
+        }
+    }
+
     /// Build stats JSON payload
     pub fn stats_json(&self) -> String {
         let stats = self.stats.lock().unwrap().clone();
         format!(
-            r#"{{"fps":{:.2},"bandwidth":{},"latency":{},"clients":{},"cpu_percent":{:.1},"mem_used":{}}}"#,
+            r#"{{"fps":{:.2},"bandwidth":{},"latency":{},"client_latency":{},"client_fps":{},"clients":{},"cpu_percent":{:.1},"mem_used":{},"ice_candidates_total":{},"ice_candidates_udp":{},"ice_candidates_tcp":{},"ice_candidates_host":{},"ice_candidates_srflx":{},"ice_candidates_relay":{},"ice_candidates_prflx":{}}}"#,
             stats.fps,
             stats.bandwidth,
             stats.latency_ms,
+            stats.client_latency_ms,
+            stats.client_fps,
             self.connection_count(),
             stats.cpu_percent,
-            stats.mem_used
+            stats.mem_used,
+            stats.ice_candidates_total,
+            stats.ice_candidates_udp,
+            stats.ice_candidates_tcp,
+            stats.ice_candidates_host,
+            stats.ice_candidates_srflx,
+            stats.ice_candidates_relay,
+            stats.ice_candidates_prflx
         )
     }
 
@@ -359,9 +325,9 @@ impl SharedState {
         self.start_time.elapsed()
     }
 
-    /// Get connection count
-    pub fn connection_count(&self) -> usize {
-        self.clients.lock().unwrap().len()
+    /// Get connection count (WebRTC sessions)
+    pub fn connection_count(&self) -> u64 {
+        self.webrtc_sessions()
     }
 
     /// Shutdown the server
@@ -369,21 +335,7 @@ impl SharedState {
         info!("Shutting down shared state...");
     }
 
-    // WebRTC-specific methods
-
-    /// Get current streaming mode
-    pub fn get_streaming_mode(&self) -> StreamingMode {
-        *self.streaming_mode.lock().unwrap()
-    }
-
-    /// Set streaming mode
-    pub fn set_streaming_mode(&self, mode: StreamingMode) {
-        let mut current = self.streaming_mode.lock().unwrap();
-        if *current != mode {
-            info!("Streaming mode changed: {:?} -> {:?}", *current, mode);
-            *current = mode;
-        }
-    }
+    // WebRTC methods
 
     /// Request a keyframe from the encoder
     pub fn request_keyframe(&self) {
@@ -420,30 +372,7 @@ impl SharedState {
         self.webrtc_session_count.load(Ordering::Relaxed)
     }
 
-    /// Increment WebSocket client count
-    pub fn increment_websocket_clients(&self) {
-        self.websocket_client_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Decrement WebSocket client count
-    pub fn decrement_websocket_clients(&self) {
-        self.websocket_client_count.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    /// Get WebSocket client count
-    #[allow(dead_code)]
-    pub fn websocket_clients(&self) -> u64 {
-        self.websocket_client_count.load(Ordering::Relaxed)
-    }
-
-    /// Check if WebRTC is enabled in configuration
-    #[allow(dead_code)]
-    pub fn is_webrtc_enabled(&self) -> bool {
-        self.config.webrtc.enabled
-    }
-
     /// Get video codec from WebRTC config
-    #[cfg(feature = "webrtc-streaming")]
     pub fn video_codec(&self) -> crate::config::VideoCodec {
         self.config.webrtc.video_codec
     }
@@ -452,21 +381,26 @@ impl SharedState {
     #[allow(dead_code)]
     pub fn extended_stats_json(&self) -> String {
         let stats = self.stats.lock().unwrap().clone();
-        let mode = self.get_streaming_mode();
         let webrtc_sessions = self.webrtc_sessions();
-        let ws_clients = self.websocket_clients();
 
         format!(
-            r#"{{"fps":{:.2},"bandwidth":{},"latency":{},"clients":{},"cpu_percent":{:.1},"mem_used":{},"streaming_mode":"{:?}","webrtc_sessions":{},"ws_clients":{}}}"#,
+            r#"{{"fps":{:.2},"bandwidth":{},"latency":{},"client_latency":{},"client_fps":{},"clients":{},"cpu_percent":{:.1},"mem_used":{},"webrtc_sessions":{},"ice_candidates_total":{},"ice_candidates_udp":{},"ice_candidates_tcp":{},"ice_candidates_host":{},"ice_candidates_srflx":{},"ice_candidates_relay":{},"ice_candidates_prflx":{}}}"#,
             stats.fps,
             stats.bandwidth,
             stats.latency_ms,
+            stats.client_latency_ms,
+            stats.client_fps,
             self.connection_count(),
             stats.cpu_percent,
             stats.mem_used,
-            mode,
             webrtc_sessions,
-            ws_clients
+            stats.ice_candidates_total,
+            stats.ice_candidates_udp,
+            stats.ice_candidates_tcp,
+            stats.ice_candidates_host,
+            stats.ice_candidates_srflx,
+            stats.ice_candidates_relay,
+            stats.ice_candidates_prflx
         )
     }
 }
@@ -477,10 +411,19 @@ pub struct RuntimeStats {
     pub fps: f64,
     pub bandwidth: u64,
     pub latency_ms: u64,
+    pub client_latency_ms: u64,
+    pub client_fps: u32,
     pub total_frames: u64,
     pub total_bytes: u64,
     pub cpu_percent: f64,
     pub mem_used: u64,
+    pub ice_candidates_total: u64,
+    pub ice_candidates_udp: u64,
+    pub ice_candidates_tcp: u64,
+    pub ice_candidates_host: u64,
+    pub ice_candidates_srflx: u64,
+    pub ice_candidates_relay: u64,
+    pub ice_candidates_prflx: u64,
 }
 
 impl Default for RuntimeStats {
@@ -489,10 +432,19 @@ impl Default for RuntimeStats {
             fps: 0.0,
             bandwidth: 0,
             latency_ms: 0,
+            client_latency_ms: 0,
+            client_fps: 0,
             total_frames: 0,
             total_bytes: 0,
             cpu_percent: 0.0,
             mem_used: 0,
+            ice_candidates_total: 0,
+            ice_candidates_udp: 0,
+            ice_candidates_tcp: 0,
+            ice_candidates_host: 0,
+            ice_candidates_srflx: 0,
+            ice_candidates_relay: 0,
+            ice_candidates_prflx: 0,
         }
     }
 }
