@@ -75,10 +75,10 @@ impl InputDataChannel {
                             return;
                         }
                     };
-                    if upload_handler.lock().unwrap().handle_control_message(text) {
+                    if upload_handler.lock().unwrap_or_else(|e| e.into_inner()).handle_control_message(text) {
                         return;
                     }
-                    if clipboard.lock().unwrap().handle_message(text) {
+                    if clipboard.lock().unwrap_or_else(|e| e.into_inner()).handle_message(text) {
                         return;
                     }
                     if shared_state.handle_command_message(text) {
@@ -351,7 +351,7 @@ impl AuxDataChannel {
                 if msg.is_string {
                     debug!("Ignoring text message on auxiliary channel {}", label);
                 } else {
-                    upload_handler.lock().unwrap().handle_binary(&msg.data);
+                    upload_handler.lock().unwrap_or_else(|e| e.into_inner()).handle_binary(&msg.data);
                 }
             })
         }));
@@ -364,7 +364,7 @@ impl AuxDataChannel {
         let upload_handler = self.upload_handler.clone();
         self.channel.on_close(Box::new(move || {
             info!("Auxiliary DataChannel closed");
-            upload_handler.lock().unwrap().abort_active();
+            upload_handler.lock().unwrap_or_else(|e| e.into_inner()).abort_active();
             Box::pin(async {})
         }));
 

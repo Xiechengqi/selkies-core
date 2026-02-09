@@ -6,7 +6,7 @@ use crate::config;
 #[derive(Parser, Debug)]
 #[command(name = "selkies-core")]
 #[command(author = "Selkies Team")]
-#[command(version = "0.1.0")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Rust-based Selkies streaming core", long_about = None)]
 pub struct Args {
     /// Configuration file path

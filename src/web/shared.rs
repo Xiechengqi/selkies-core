@@ -90,9 +90,9 @@ impl SharedState {
         input_sender: mpsc::UnboundedSender<InputEventData>,
         runtime_settings: Arc<RuntimeSettings>,
     ) -> Self {
-        let (rtp_sender, _) = broadcast::channel(500);
-        let (audio_sender, _) = broadcast::channel(100);
-        let (text_sender, _) = broadcast::channel(100);
+        let (rtp_sender, _) = broadcast::channel(2000);
+        let (audio_sender, _) = broadcast::channel(500);
+        let (text_sender, _) = broadcast::channel(256);
         let display_size = Arc::new(Mutex::new((config.display.width, config.display.height)));
 
         Self {
@@ -362,9 +362,23 @@ impl SharedState {
         self.webrtc_session_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Decrement WebRTC session count
+    /// Decrement WebRTC session count (saturating to avoid underflow)
     pub fn decrement_webrtc_sessions(&self) {
-        self.webrtc_session_count.fetch_sub(1, Ordering::Relaxed);
+        let mut current = self.webrtc_session_count.load(Ordering::Relaxed);
+        loop {
+            if current == 0 {
+                break;
+            }
+            match self.webrtc_session_count.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// Get WebRTC session count

@@ -256,6 +256,7 @@ impl SessionManager {
         // Store session
         let mut sessions = self.sessions.write().await;
         sessions.insert(session_id.clone(), session.clone());
+        self.shared_state.increment_webrtc_sessions();
 
         info!("Created WebRTC session: {}", session_id);
         Ok(session)
@@ -274,9 +275,11 @@ impl SessionManager {
 
         // Connection state change callback
         let session_id_clone = session_id.clone();
+        let shared_state_cb = shared_state.clone();
         session.peer_connection.on_peer_connection_state_change(Box::new(move |state| {
             let session_id = session_id_clone.clone();
             let sessions = sessions.clone();
+            let shared_state_cb = shared_state_cb.clone();
 
             Box::pin(async move {
                 info!("Session {} connection state: {:?}", session_id, state);
@@ -290,6 +293,7 @@ impl SessionManager {
                         drop(sessions_read);
                         let mut sessions_write = sessions.write().await;
                         sessions_write.remove(&session_id);
+                        shared_state_cb.decrement_webrtc_sessions();
                         info!("Removed session {} due to state {:?}", session_id, state);
                     }
                 }

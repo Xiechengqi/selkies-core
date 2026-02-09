@@ -88,67 +88,81 @@ pub fn run_audio_capture(
 
     let mut encoder = Encoder::new(sample_rate, channels, Application::Audio)?;
     encoder.set_bitrate(Bitrate::Bits(config.bitrate as i32))?;
+    let encoder = Arc::new(std::sync::Mutex::new(encoder));
 
     let frame_size = (sample_rate / 50) as usize; // 20ms
     let samples_per_frame = frame_size * channel_count as usize;
     let buffer = Arc::new(std::sync::Mutex::new(VecDeque::<i16>::new()));
 
-    let err_fn = |err| {
-        eprintln!("Audio stream error: {:?}", err);
-    };
-
-    let buffer_clone = buffer.clone();
-    let sender_clone = sender.clone();
-    let running_clone = running.clone();
-
     let stream = match supported_config.sample_format() {
-        cpal::SampleFormat::F32 => device.build_input_stream(
-            &supported_config.config(),
-            move |data: &[f32], _| {
-                if !running_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
-                let mut buf = buffer_clone.lock().unwrap();
-                for sample in data {
-                    let s = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                    buf.push_back(s);
-                }
-                encode_ready_frames(&mut encoder, &mut buf, frame_size, samples_per_frame, &sender_clone);
-            },
-            err_fn,
-            None,
-        )?,
-        cpal::SampleFormat::I16 => device.build_input_stream(
-            &supported_config.config(),
-            move |data: &[i16], _| {
-                if !running_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
-                let mut buf = buffer_clone.lock().unwrap();
-                for sample in data {
-                    buf.push_back(*sample);
-                }
-                encode_ready_frames(&mut encoder, &mut buf, frame_size, samples_per_frame, &sender_clone);
-            },
-            err_fn,
-            None,
-        )?,
-        cpal::SampleFormat::U16 => device.build_input_stream(
-            &supported_config.config(),
-            move |data: &[u16], _| {
-                if !running_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
-                let mut buf = buffer_clone.lock().unwrap();
-                for sample in data {
-                    let s = (*sample as i32 - 32768) as i16;
-                    buf.push_back(s);
-                }
-                encode_ready_frames(&mut encoder, &mut buf, frame_size, samples_per_frame, &sender_clone);
-            },
-            err_fn,
-            None,
-        )?,
+        cpal::SampleFormat::F32 => {
+            let buffer_clone = buffer.clone();
+            let sender_clone = sender.clone();
+            let running_clone = running.clone();
+            let encoder_clone = encoder.clone();
+            device.build_input_stream(
+                &supported_config.config(),
+                move |data: &[f32], _| {
+                    if !running_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    let mut buf = buffer_clone.lock().unwrap();
+                    for sample in data {
+                        let s = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                        buf.push_back(s);
+                    }
+                    let mut enc = encoder_clone.lock().unwrap();
+                    encode_ready_frames(&mut enc, &mut buf, frame_size, samples_per_frame, &sender_clone);
+                },
+                |err| eprintln!("Audio stream error: {:?}", err),
+                None,
+            )?
+        }
+        cpal::SampleFormat::I16 => {
+            let buffer_clone = buffer.clone();
+            let sender_clone = sender.clone();
+            let running_clone = running.clone();
+            let encoder_clone = encoder.clone();
+            device.build_input_stream(
+                &supported_config.config(),
+                move |data: &[i16], _| {
+                    if !running_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    let mut buf = buffer_clone.lock().unwrap();
+                    for sample in data {
+                        buf.push_back(*sample);
+                    }
+                    let mut enc = encoder_clone.lock().unwrap();
+                    encode_ready_frames(&mut enc, &mut buf, frame_size, samples_per_frame, &sender_clone);
+                },
+                |err| eprintln!("Audio stream error: {:?}", err),
+                None,
+            )?
+        }
+        cpal::SampleFormat::U16 => {
+            let buffer_clone = buffer.clone();
+            let sender_clone = sender.clone();
+            let running_clone = running.clone();
+            let encoder_clone = encoder.clone();
+            device.build_input_stream(
+                &supported_config.config(),
+                move |data: &[u16], _| {
+                    if !running_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    let mut buf = buffer_clone.lock().unwrap();
+                    for sample in data {
+                        let s = (*sample as i32 - 32768) as i16;
+                        buf.push_back(s);
+                    }
+                    let mut enc = encoder_clone.lock().unwrap();
+                    encode_ready_frames(&mut enc, &mut buf, frame_size, samples_per_frame, &sender_clone);
+                },
+                |err| eprintln!("Audio stream error: {:?}", err),
+                None,
+            )?
+        }
     };
 
     stream.play()?;

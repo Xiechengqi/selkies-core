@@ -172,7 +172,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 } else if let Some(text) = system_clipboard::read_text() {
                     let data = text.into_bytes();
-                    let hash = xxh64(&data, 0);
+                    let mut hash = xxh64(b"text/plain", 0);
+                    hash = xxh64(&data, hash);
                     let last_written = clipboard_state.last_clipboard_hash();
                     if last_seen_hash != Some(hash) && last_written != Some(hash) {
                         let encoded = base64::engine::general_purpose::STANDARD.encode(data);
@@ -182,7 +183,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else if let Some(text) = system_clipboard::read_text() {
                 let data = text.into_bytes();
-                let hash = xxh64(&data, 0);
+                let mut hash = xxh64(b"text/plain", 0);
+                hash = xxh64(&data, hash);
                 let last_written = clipboard_state.last_clipboard_hash();
                 if last_seen_hash != Some(hash) && last_written != Some(hash) {
                     let encoded = base64::engine::general_purpose::STANDARD.encode(data);
@@ -451,6 +453,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let conn = Arc::new(conn);
             let screen = &conn.setup().roots[screen_num as usize];
             let root = screen.root;
+            if hide_cursor(&conn, root) {
+                cursor_hidden_cursor.store(true, Ordering::Relaxed);
+                info!("Cursor tracking: Hardware cursor hidden");
+            } else {
+                warn!("Cursor tracking: Failed to hide hardware cursor");
+            }
             if let Err(e) = conn.xfixes_select_cursor_input(root, CursorNotifyMask::DISPLAY_CURSOR) {
                 warn!("Cursor tracking: Failed to select cursor input events: {:?}", e);
             }
@@ -1026,7 +1034,6 @@ fn env_bool(key: &str) -> Option<bool> {
 }
 
 fn apply_webrtc_network_overrides(config: &mut Config, args: &Args) {
-    let env_profile = env_var("SELKIES_WEBRTC_PROFILE");
     let env_trickle = env_bool("SELKIES_WEBRTC_ICE_TRICKLE");
     let env_nat1to1 = env_var("SELKIES_WEBRTC_NAT1TO1");
     let env_ip_url = env_var("SELKIES_WEBRTC_IP_RETRIEVAL_URL");
@@ -1042,10 +1049,6 @@ fn apply_webrtc_network_overrides(config: &mut Config, args: &Args) {
     let env_turn_shared_secret = env_var("SELKIES_WEBRTC_TURN_SHARED_SECRET");
     let env_turn_username = env_var("SELKIES_WEBRTC_TURN_USERNAME");
     let env_turn_password = env_var("SELKIES_WEBRTC_TURN_PASSWORD");
-
-    if let Some(profile) = args.webrtc_profile.clone().or(env_profile) {
-        config.webrtc.network_profile = Some(profile);
-    }
 
     if let Some(trickle) = args.webrtc_ice_trickle.or(env_trickle) {
         config.webrtc.ice_trickle = trickle;

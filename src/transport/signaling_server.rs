@@ -71,6 +71,8 @@ pub async fn handle_signaling_connection(
                 let text_str: &str = text.as_ref();
 
                 if let Some(reply) = handle_gstreamer_control_message(text_str, &mut wire_format) {
+                    // Send the control reply first (HELLO or SESSION_OK)
+                    let _ = tx.send(reply.clone());
                     if reply == "SESSION_OK" {
                         if let Some(payload) = handle_gstreamer_session_request(
                             &mut session_id,
@@ -83,7 +85,6 @@ pub async fn handle_signaling_connection(
                             let _ = tx.send(payload);
                         }
                     }
-                    let _ = tx.send(reply);
                     continue;
                 }
 
@@ -439,7 +440,7 @@ fn parse_gstreamer_json_message(text: &str) -> Option<SignalingMessage> {
         if sdp_type == "answer" {
             return Some(SignalingMessage::Answer {
                 sdp: sdp_text.to_string(),
-                session_id: String::new(),
+                session_id: String::default(),
             });
         }
         return None;

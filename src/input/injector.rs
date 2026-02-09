@@ -2,6 +2,7 @@
 //!
 //! Provides keyboard and mouse simulation via XTest extension.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use x11rb::connection::Connection;
 use x11rb::errors::ConnectionError;
@@ -94,6 +95,8 @@ pub struct InputInjector {
     mouse_y: i32,
     /// Input configuration
     config: InputConfig,
+    /// Keysym to keycode cache
+    keysym_cache: HashMap<u32, u8>,
 }
 
 /// Input configuration
@@ -127,12 +130,30 @@ impl InputInjector {
         let screen = &conn.setup().roots[screen_num as usize];
         let root = screen.root;
 
+        // Build keysym-to-keycode cache
+        let mut keysym_cache = HashMap::new();
+        let min_keycode = conn.setup().min_keycode;
+        let max_keycode = conn.setup().max_keycode;
+        if let Ok(cookie) = conn.get_keyboard_mapping(min_keycode, max_keycode - min_keycode + 1) {
+            if let Ok(mapping) = cookie.reply() {
+                let keysyms_per_keycode = mapping.keysyms_per_keycode as usize;
+                for i in 0..=(max_keycode - min_keycode) as usize {
+                    let offset = i * keysyms_per_keycode;
+                    if offset < mapping.keysyms.len() && mapping.keysyms[offset] != 0 {
+                        keysym_cache.entry(mapping.keysyms[offset])
+                            .or_insert((min_keycode as usize + i) as u8);
+                    }
+                }
+            }
+        }
+
         Ok(Self {
             conn,
             root,
             mouse_x: 0,
             mouse_y: 0,
             config,
+            keysym_cache,
         })
     }
 
@@ -142,13 +163,15 @@ impl InputInjector {
             return Ok(());
         }
 
-        let scale = self.config.mouse_sensitivity.max(0.1);
-        self.mouse_x = (x as f64 * scale).round() as i32;
-        self.mouse_y = (y as f64 * scale).round() as i32;
+        // Coordinates are absolute screen positions; sensitivity does not apply
+        self.mouse_x = x;
+        self.mouse_y = y;
 
-        // Warp pointer to new position
+        // Warp pointer to new position (clamp to i16 range for X11 protocol)
+        let wx = self.mouse_x.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        let wy = self.mouse_y.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         self.conn
-            .warp_pointer(0u32, self.root, 0, 0, 0, 0, self.mouse_x as i16, self.mouse_y as i16)?;
+            .warp_pointer(0u32, self.root, 0, 0, 0, 0, wx, wy)?;
 
         self.conn.flush()?;
         Ok(())
@@ -188,7 +211,9 @@ impl InputInjector {
         }
 
         // Map wheel deltas to button events (4=up, 5=down, 6=left, 7=right)
-        let steps_y = (delta_y as i32).abs().min(10) as usize;
+        // Browser wheel events send deltas in multiples of 120; normalize to discrete steps
+        let norm_y = (delta_y as i32) / 120;
+        let steps_y = norm_y.unsigned_abs().max(if delta_y != 0 { 1 } else { 0 }).min(10) as usize;
         for _ in 0..steps_y {
             if delta_y < 0 {
                 self.mouse_button(4, true)?;
@@ -199,7 +224,8 @@ impl InputInjector {
             }
         }
 
-        let steps_x = (delta_x as i32).abs().min(10) as usize;
+        let norm_x = (delta_x as i32) / 120;
+        let steps_x = norm_x.unsigned_abs().max(if delta_x != 0 { 1 } else { 0 }).min(10) as usize;
         for _ in 0..steps_x {
             if delta_x < 0 {
                 self.mouse_button(6, true)?;
@@ -243,8 +269,13 @@ impl InputInjector {
         Ok(())
     }
 
-    /// Convert X keysym to X keycode
+    /// Convert X keysym to X keycode (cached)
     fn keysym_to_keycode(&self, keysym: u32) -> Option<u8> {
+        if let Some(&kc) = self.keysym_cache.get(&keysym) {
+            return Some(kc);
+        }
+
+        // Fallback: linear scan for keysyms not in cache
         let min_keycode = self.conn.setup().min_keycode;
         let max_keycode = self.conn.setup().max_keycode;
 
