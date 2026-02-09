@@ -85,8 +85,8 @@ pub async fn run_http_server_with_webrtc(
             .route("/webrtc", get(signaling_handler.clone()))
             .route("/webrtc/signaling", get(signaling_handler.clone()))
             .route("/webrtc/signaling/", get(signaling_handler.clone()))
-            .route("/:app/signaling", get(signaling_handler.clone()))
-            .route("/:app/signaling/", get(signaling_handler));
+            .route("/{app}/signaling", get(signaling_handler.clone()))
+            .route("/{app}/signaling/", get(signaling_handler));
     }
 
     // Set up fallback for static files
