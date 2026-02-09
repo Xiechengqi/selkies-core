@@ -58,6 +58,7 @@ pub struct VideoTrackWriter {
     stats: Arc<RtpStats>,
     clock_rate: u32,
     error_count: Arc<AtomicU64>,
+    paused_count: Arc<AtomicU64>,
 }
 
 impl VideoTrackWriter {
@@ -69,11 +70,21 @@ impl VideoTrackWriter {
             stats: Arc::new(RtpStats::new()),
             clock_rate: 90000,  // Standard video clock rate
             error_count: Arc::new(AtomicU64::new(0)),
+            paused_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// Write an RTP packet to the track
     pub async fn write_rtp(&self, packet: &[u8]) -> Result<(), WebRTCError> {
+        if self.track.all_binding_paused().await {
+            let count = self.paused_count.fetch_add(1, Ordering::Relaxed) + 1;
+            if count <= 5 || count % 1000 == 0 {
+                warn!("RTP write skipped ({}): track sender paused", count);
+            }
+            self.stats.record_dropped();
+            return Ok(());
+        }
+
         let bytes = Bytes::copy_from_slice(packet);
 
         match self.track.write(&bytes).await {
