@@ -219,11 +219,16 @@ impl VideoPipeline {
             VideoCodec::AV1 => ("rtpav1pay", 99),
         };
 
-        gst::ElementFactory::make(element_name)
-            .property("pt", pt as u32)
-            .property("config-interval", -1i32)  // Send config with every IDR
-            // Note: aggregate-mode requires enum type, skip for now
-            .build()
+        let mut builder = gst::ElementFactory::make(element_name)
+            .property("pt", pt as u32);
+
+        // For H264, ensure SPS/PPS are sent regularly for browser decoders.
+        if matches!(codec, VideoCodec::H264) {
+            builder = builder.property("config-interval", 1i32);
+        }
+
+        // Note: aggregate-mode requires enum type, skip for now
+        builder.build()
             .map_err(|e| GstError::PipelineFailed(format!("Failed to create {}: {}", element_name, e)))
     }
 
