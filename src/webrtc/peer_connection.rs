@@ -317,8 +317,6 @@ impl PeerConnectionManager {
         peer_connection: &Arc<RTCPeerConnection>,
         label: &str,
     ) -> Result<Arc<RTCDataChannel>, WebRTCError> {
-        use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
-
         let channel = peer_connection.create_data_channel(label, None).await
             .map_err(|e| WebRTCError::DataChannelError(format!("Failed to create data channel: {}", e)))?;
 

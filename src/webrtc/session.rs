@@ -24,7 +24,7 @@ use tokio::sync::{mpsc, RwLock};
 use std::sync::Mutex;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
-use webrtc::rtp_transceiver::rtp_transceiver_init::RTCRtpTransceiverInit;
+use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::data_channel::RTCDataChannel;

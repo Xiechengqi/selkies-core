@@ -6,7 +6,7 @@
 
 use super::WebRTCError;
 use crate::config::VideoCodec;
-use log::{debug, warn};
+use log::warn;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
