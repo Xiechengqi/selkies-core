@@ -3,7 +3,7 @@
 use crate::web::SharedState;
 use crate::system_clipboard;
 use base64::Engine;
-use log::{debug, info, warn};
+use log::{info, warn};
 use std::sync::Arc;
 
 pub struct ClipboardReceiver {

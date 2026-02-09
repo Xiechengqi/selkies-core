@@ -70,23 +70,22 @@ pub async fn run_http_server_with_webrtc(
     // Add WebRTC signaling endpoint if session manager is provided
     if let Some(manager) = session_manager {
         info!("Adding WebRTC signaling endpoint at /webrtc");
-        let signaling_handler = {
-            let state_clone = state.clone();
-            move |ws: WebSocketUpgrade| {
-                let state = state_clone.clone();
-                let manager = manager.clone();
-                async move {
-                    ws.on_upgrade(move |socket| async move {
-                        crate::transport::handle_signaling_connection(socket, state, manager).await;
-                    })
-                }
+        let state_clone = state.clone();
+        let manager_clone = manager.clone();
+        let signaling_handler = move |ws: WebSocketUpgrade| {
+            let state = state_clone.clone();
+            let manager = manager_clone.clone();
+            async move {
+                ws.on_upgrade(move |socket| async move {
+                    crate::transport::handle_signaling_connection(socket, state, manager).await;
+                })
             }
         };
         app = app
-            .route("/webrtc", get(signaling_handler))
-            .route("/webrtc/signaling", get(signaling_handler))
-            .route("/webrtc/signaling/", get(signaling_handler))
-            .route("/:app/signaling", get(signaling_handler))
+            .route("/webrtc", get(signaling_handler.clone()))
+            .route("/webrtc/signaling", get(signaling_handler.clone()))
+            .route("/webrtc/signaling/", get(signaling_handler.clone()))
+            .route("/:app/signaling", get(signaling_handler.clone()))
             .route("/:app/signaling/", get(signaling_handler));
     }
 
