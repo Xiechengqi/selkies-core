@@ -37,6 +37,10 @@ jobs:
           cd web/selkies
           npm ci
           npm run build
+          mkdir -p dist
+          cp -f selkies-core.js selkies-wr-core.js selkies-ws-core.js dist/
+          rm -rf dist/lib
+          cp -a lib dist/lib
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

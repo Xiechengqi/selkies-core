@@ -70,6 +70,10 @@ if [ -z "$SKIP_WEB_BUILD" ]; then
         pushd "web/selkies" >/dev/null
         npm install
         npm run build
+        mkdir -p dist
+        cp -f selkies-core.js selkies-wr-core.js selkies-ws-core.js dist/
+        rm -rf dist/lib
+        cp -a lib dist/lib
         popd >/dev/null
         echo "Frontend build completed."
         echo ""
