@@ -180,11 +180,11 @@ impl PeerConnectionManager {
 
     /// Create a video track for the specified codec
     pub fn create_video_track(&self, codec: VideoCodec) -> Result<Arc<TrackLocalStaticRTP>, WebRTCError> {
-        let (mime_type, _payload_type) = match codec {
-            VideoCodec::H264 => (MIME_TYPE_H264, 96),
-            VideoCodec::VP8 => (MIME_TYPE_VP8, 97),
-            VideoCodec::VP9 => (MIME_TYPE_VP9, 98),
-            VideoCodec::AV1 => ("video/AV1", 99),
+        let (mime_type, fmtp) = match codec {
+            VideoCodec::H264 => (MIME_TYPE_H264, "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"),
+            VideoCodec::VP8 => (MIME_TYPE_VP8, ""),
+            VideoCodec::VP9 => (MIME_TYPE_VP9, "profile-id=0"),
+            VideoCodec::AV1 => ("video/AV1", ""),
         };
 
         let track = TrackLocalStaticRTP::new(
@@ -192,7 +192,7 @@ impl PeerConnectionManager {
                 mime_type: mime_type.to_string(),
                 clock_rate: 90000,
                 channels: 0,
-                sdp_fmtp_line: "".to_string(),
+                sdp_fmtp_line: fmtp.to_string(),
                 rtcp_feedback: vec![],
             },
             format!("video-{}", uuid::Uuid::new_v4()),
