@@ -59,6 +59,7 @@ pub struct VideoTrackWriter {
     clock_rate: u32,
     error_count: Arc<AtomicU64>,
     paused_count: Arc<AtomicU64>,
+    no_binding_count: Arc<AtomicU64>,
 }
 
 impl VideoTrackWriter {
@@ -71,12 +72,23 @@ impl VideoTrackWriter {
             clock_rate: 90000,  // Standard video clock rate
             error_count: Arc::new(AtomicU64::new(0)),
             paused_count: Arc::new(AtomicU64::new(0)),
+            no_binding_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// Write an RTP packet to the track
     pub async fn write_rtp(&self, packet: &[u8]) -> Result<(), WebRTCError> {
-        if self.track.all_binding_paused().await {
+        let any_paused = self.track.any_binding_paused().await;
+        let all_paused = self.track.all_binding_paused().await;
+        if !any_paused && all_paused {
+            let count = self.no_binding_count.fetch_add(1, Ordering::Relaxed) + 1;
+            if count <= 5 || count % 1000 == 0 {
+                warn!("RTP write skipped ({}): no track bindings", count);
+            }
+            self.stats.record_dropped();
+            return Ok(());
+        }
+        if all_paused {
             let count = self.paused_count.fetch_add(1, Ordering::Relaxed) + 1;
             if count <= 5 || count % 1000 == 0 {
                 warn!("RTP write skipped ({}): track sender paused", count);
