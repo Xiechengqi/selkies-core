@@ -1129,7 +1129,7 @@ export class Input {
         this._cursorImageBitmap = null;
         this._rawHotspotX = 0;
         this._rawHotspotY = 0;
-        this.use_browser_cursors = false;
+        this.use_browser_cursors = true;
         this._useDefaultCursor = false;
         this._latestMouseX = 0;
         this._latestMouseY = 0;
@@ -1263,15 +1263,7 @@ export class Input {
     }
 
     async updateServerCursor(cursorData) {
-        console.log('[Input] updateServerCursor called with:', cursorData);
-        console.log('[Input] cursorData.curdata exists:', !!cursorData.curdata);
-        console.log('[Input] cursorData.handle:', cursorData.handle);
-        console.log('[Input] this._trackpadMode:', this._trackpadMode);
-        console.log('[Input] this.inputAttached:', this.inputAttached);
-        console.log('[Input] this.use_browser_cursors:', this.use_browser_cursors);
-
         if (cursorData.override) {
-            console.log(`[Input] Cursor override set to ${cursorData.override}`);
             this._cursorImageBitmap = null;
             this._cursorBase64Data = null;
             this.cursorDiv.style.display = 'none';
@@ -1659,6 +1651,9 @@ export class Input {
     }
 
     _mouseButtonMovement(event) {
+        if (event.type === 'mousedown' || event.type === 'mouseup') {
+            console.log('[btn]', event.type, 'target:', event.target.id, 'mask:', this.buttonMask, 'attached:', this.inputAttached, 'trackpad:', this._trackpadMode);
+        }
         if (this.buttonMask === 0 && event.target !== this.element) {
             return;
         }
@@ -1712,7 +1707,7 @@ export class Input {
             this.x = Math.round(movementX_logical * dpr_for_input_coords);
             this.y = Math.round(movementY_logical * dpr_for_input_coords);
 
-        } else if (event.type === 'mousemove' || event.type === 'pointermove') {
+        } else {
              if ((window.is_manual_resolution_mode || this.isSharedMode) && canvas) {
                 const canvasRect = canvas.getBoundingClientRect(); // CSS logical size
                 if (canvasRect.width > 0 && canvasRect.height > 0 && canvas.width > 0 && canvas.height > 0) {
@@ -1743,14 +1738,16 @@ export class Input {
                     this.x = 0; this.y = 0; // Fallback
                 }
             } else { // Auto resolution mode (non-manual)
-                if (!this.m) {
-                    this._windowMath();
-                }
+                this._windowMath();
                 if (this.m) {
                     let logicalX_on_element = this._clientToServerX(event.clientX);
                     let logicalY_on_element = this._clientToServerY(event.clientY);
-                    this.x = Math.round(logicalX_on_element * dpr_for_input_coords);
-                    this.y = Math.round(logicalY_on_element * dpr_for_input_coords);
+                    this.x = Math.round(logicalX_on_element);
+                    this.y = Math.round(logicalY_on_element);
+                    if (!this._debugCount) this._debugCount = 0;
+                    if (this._debugCount++ % 200 === 0) {
+                        console.log('[mouse] clientY:', event.clientY, 'serverY:', this.y, 'offY:', this.m.mouseOffsetY.toFixed(1), 'multiY:', this.m.mouseMultiY.toFixed(3));
+                    }
                 } else {
                     this.x = 0; this.y = 0;
                 }
@@ -1765,6 +1762,9 @@ export class Input {
             }
         }
         var toks = [ mtype, this.x, this.y, this.buttonMask, 0 ];
+        if (event.type === 'mousedown' || event.type === 'mouseup') {
+            console.log('[click]', event.type, 'send:', toks.join(","));
+        }
         this.send(toks.join(","));
     }
 
@@ -2369,14 +2369,21 @@ export class Input {
     _windowMath() {
         const elementRect = this.element.getBoundingClientRect();
         const windowW = elementRect.width; const windowH = elementRect.height;
-        const frameW = this.element.offsetWidth; const frameH = this.element.offsetHeight;
-        if (windowW <= 0 || windowH <= 0 || frameW <= 0 || frameH <= 0) { this.m = null; return; }
-        const multiX = windowW / frameW; const multiY = windowH / frameH;
-        const multi = Math.min(multiX, multiY);
-        const vpWidth = frameW * multi; const vpHeight = frameH * multi;
+        if (windowW <= 0 || windowH <= 0) { this.m = null; return; }
+
+        // Use the video element's native resolution as the server coordinate space
+        const videoEle = document.getElementById("stream");
+        const frameW = (videoEle && videoEle.videoWidth > 0) ? videoEle.videoWidth : 0;
+        const frameH = (videoEle && videoEle.videoHeight > 0) ? videoEle.videoHeight : 0;
+        if (frameW <= 0 || frameH <= 0) { this.m = null; return; }
+
+        // Calculate the viewport that preserves aspect ratio (objectFit: contain)
+        const scaleX = windowW / frameW; const scaleY = windowH / frameH;
+        const scale = Math.min(scaleX, scaleY);
+        const vpWidth = frameW * scale; const vpHeight = frameH * scale;
         const offsetX = (windowW - vpWidth) / 2.0; const offsetY = (windowH - vpHeight) / 2.0;
-        const mouseMultiX = (vpWidth > 0) ? frameW / vpWidth : 1;
-        const mouseMultiY = (vpHeight > 0) ? frameH / vpHeight : 1;
+        const mouseMultiX = frameW / vpWidth;
+        const mouseMultiY = frameH / vpHeight;
         this.m = {
             mouseMultiX, mouseMultiY, mouseOffsetX: offsetX, mouseOffsetY: offsetY,
             elementClientX: elementRect.left, elementClientY: elementRect.top,

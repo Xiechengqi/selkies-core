@@ -24,7 +24,7 @@
 
 /*eslint no-unused-vars: ["error", { "vars": "local" }]*/
 
-import { Input } from "./input.js?v=1";
+import { Input } from "./input2.js?v=1";
 import { base64ToString, Queue } from "./util.js?v=1";
 /**
  * @typedef {Object} WebRTCDemo
@@ -384,20 +384,38 @@ export class WebRTCDemo {
 	 * @param {MessageEvent} event
 	 */
 	_onPeerDataChannelMessage(event) {
-		// Attempt to parse message as JSON
-		var msg;
-		try {
-			msg = JSON.parse(event.data);
-		} catch (e) {
-			if (e instanceof SyntaxError) {
-				this._setError("error parsing data channel message as JSON: " + event.data);
-			} else {
-				this._setError("failed to parse data channel message: " + event.data);
-			}
+		// Convert binary data to string if needed
+		var rawData;
+		if (typeof event.data === 'string') {
+			rawData = event.data;
+		} else if (event.data instanceof ArrayBuffer) {
+			rawData = new TextDecoder().decode(event.data);
+		} else if (event.data instanceof Blob) {
+			// Blob needs async reading; skip for now
+			return;
+		} else {
 			return;
 		}
 
-		this._setDebug("data channel message: " + event.data);
+		// Parse message: try JSON first, then comma-separated "type,json" format
+		var msg;
+		try {
+			msg = JSON.parse(rawData);
+		} catch (e) {
+			// Try comma-separated format: "type,{json}" or "type,data"
+			var commaIdx = rawData.indexOf(",");
+			if (commaIdx > 0) {
+				var msgType = rawData.substring(0, commaIdx);
+				var msgPayload = rawData.substring(commaIdx + 1);
+				try {
+					msg = { type: msgType, data: JSON.parse(msgPayload) };
+				} catch (e2) {
+					msg = { type: msgType, data: msgPayload };
+				}
+			} else {
+				msg = { type: rawData, data: null };
+			}
+		}
 
 		if (msg.type === 'pipeline') {
 			this._setStatus(msg.data.status);
@@ -405,8 +423,34 @@ export class WebRTCDemo {
 			if (this.ongpustats !== null) {
 					this.ongpustats(msg.data);
 			}
+		} else if (msg.type === 'clipboard') {
+			// Server sends: clipboard,<base64>
+			if (msg.data !== null && this.onclipboardcontent !== null) {
+				var text = base64ToString(typeof msg.data === 'string' ? msg.data : msg.data.content || '');
+				this._setDebug("received clipboard contents, length: " + text.length);
+				this.onclipboardcontent(text);
+			}
+		} else if (msg.type === 'clipboard_start') {
+			// Start of chunked clipboard transfer
+			this.clipboardcontent.length = 0;
+		} else if (msg.type === 'clipboard_data') {
+			// Chunk of clipboard data (base64)
+			if (msg.data !== null) {
+				this.clipboardcontent.push(typeof msg.data === 'string' ? msg.data : '');
+			}
+		} else if (msg.type === 'clipboard_finish') {
+			// End of chunked clipboard transfer
+			var text = base64ToString(this.clipboardcontent.join(''));
+			this._setDebug("received chunked clipboard contents, length: " + text.length);
+			if (this.onclipboardcontent !== null) {
+				this.onclipboardcontent(text);
+			}
+			this.clipboardcontent.length = 0;
+		} else if (msg.type === 'clipboard_binary') {
+			// Binary clipboard: clipboard_binary,mime,base64
+			this._setDebug("received binary clipboard");
 		} else if (msg.type.startsWith('clipboard-msg')) {
-			// clipboard-msg-end indicates the end of chucks of a clipboard msg
+			// Legacy format: clipboard-msg / clipboard-msg-end
 			if (msg.type === "clipboard-msg-end") {
 				if (msg.data !== null) this.clipboardcontent.push(msg.data.content);
 				var text = base64ToString(this.clipboardcontent.join(''));
@@ -414,7 +458,6 @@ export class WebRTCDemo {
 				if (this.onclipboardcontent !== null) {
 					this.onclipboardcontent(text);
 				}
-				// Clear the clipboard content after processing the full message
 				this.clipboardcontent.length = 0;
 			} else {
 				if (msg.data !== null) this.clipboardcontent.push(msg.data.content);
@@ -423,31 +466,32 @@ export class WebRTCDemo {
 			if (this.oncursorchange !== null && msg.data !== null) {
 				let cursorData = {
 					curdata: msg.data.curdata,
-					width: msg.data.width,
-					height: msg.data.height,
 					hotx: msg.data.hotx,
 					hoty: msg.data.hoty,
 					handle: msg.data.handle,
+					x: msg.data.x,
+					y: msg.data.y,
 				};
-				this._setDebug(`received new cursor contents, ${JSON.stringify(cursorData)}`);
-				this.oncursorchange(cursorData)
+				if (msg.data.override) cursorData.override = msg.data.override;
+				this.oncursorchange(cursorData);
 			}
 		} else if (msg.type === 'system') {
-			if (msg.action !== null) {
-				this._setDebug("received system msg, action: " + msg.data.action);
-				var action = msg.data.action;
-				if (this.onsystemaction !== null) {
-					this.onsystemaction(action);
+			if (msg.data !== null && msg.data.action !== undefined) {
+				if (msg.data.action !== 'bitrate') {
+					this._setDebug("received system msg, action: " + msg.data.action);
+					if (this.onsystemaction !== null) {
+						this.onsystemaction(msg.data.action);
+					}
 				}
 			}
-		} else if (msg.type === 'ping') {
-			this._setDebug("received server ping: " + JSON.stringify(msg.data));
-			this.sendDataChannelMessage("pong," + new Date().getTime() / 1000);
-		} else if (msg.type === 'system_stats') {
-			this._setDebug("received systems stats: " + JSON.stringify(msg.data));
+		} else if (msg.type === 'stats' || msg.type === 'system_stats') {
+			this._setDebug("received system stats");
 			if (this.onsystemstats !== null) {
 				this.onsystemstats(msg.data);
 			}
+		} else if (msg.type === 'ping') {
+			this._setDebug("received server ping");
+			this.sendDataChannelMessage("pong," + new Date().getTime() / 1000);
 		} else if (msg.type === 'latency_measurement') {
 			if (this.onlatencymeasurement !== null) {
 				this.onlatencymeasurement(msg.data.latency_ms);
@@ -456,8 +500,10 @@ export class WebRTCDemo {
 			if (this.onserversettings !== null) {
 				this.onserversettings(msg.data);
 			}
+		} else if (msg.type === 'window_state') {
+			this._setDebug("received window state: " + JSON.stringify(msg.data));
 		} else {
-			this._setError("Unhandled message received: " + msg.type);
+			this._setDebug("Unhandled message type: " + msg.type);
 		}
 	}
 
@@ -844,13 +890,18 @@ export class WebRTCDemo {
 	 */
 	// [START playStream]
 	playStream() {
-		this.element.load();
+		// Ensure muted for autoplay policy compliance
+		this.element.muted = true;
+		// NOTE: element.load() can reset srcObject on some browsers, skip it for MediaStream
+		if (!this.element.srcObject) {
+			this.element.load();
+		}
 
 		var playPromise = this.element.play();
 		if (playPromise !== undefined) {
 			playPromise.then(() => {
 				this._setDebug("Stream is playing.");
-			}).catch(() => {
+			}).catch((e) => {
 				if (this.onplaystreamrequired !== null) {
 					this.onplaystreamrequired();
 				} else {

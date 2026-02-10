@@ -25,10 +25,10 @@
  *   limitations under the License.
  */
 
-import { WebRTCDemo } from "./lib/webrtc.js?v=1";
+import { WebRTCDemo } from "./lib/webrtc.js?v=5";
 import { WebRTCDemoSignaling } from "./lib/signaling.js?v=1";
 import { stringToBase64 } from "./lib/util.js?v=1";
-import { Input } from "./lib/input.js?v=1";
+import { Input } from "./lib/input2.js?v=1";
 
 function InitUI() {
 	let style = document.createElement('style');
@@ -477,7 +477,7 @@ export default function webrtc() {
 			videoElement.style.height = `${targetHeight}px`;
 			videoElement.style.top = '0px';
 			videoElement.style.left = '0px';
-			videoElement.style.objectFit = 'fill'; // Use 'fill' to ignore aspect ratio
+			videoElement.style.objectFit = 'contain';
 			console.log(`Applied manual style (Exact): CSS ${targetWidth}x${targetHeight}, Pos 0,0`);
 		}
 		updateVideoImageRendering();
@@ -497,11 +497,11 @@ export default function webrtc() {
 		}
 
 		videoElement.style.position = 'absolute';
-		videoElement.style.width = `${logicalWidth}px`;
-		videoElement.style.height = `${logicalHeight}px`;
+		videoElement.style.width = '100%';
+		videoElement.style.height = '100%';
 		videoElement.style.top = '0px';
 		videoElement.style.left = '0px';
-		videoElement.style.objectFit = 'fill';
+		videoElement.style.objectFit = 'contain';
 		console.log(`Resized to window resolution: ${logicalWidth}x${logicalHeight}`);
 	}
 
@@ -1054,6 +1054,10 @@ export default function webrtc() {
 			videoElement.className = 'video';
 			videoElement.autoplay = true;
 			videoElement.playsInline = true;
+			videoElement.muted = true;
+			videoElement.setAttribute('muted', '');
+			videoElement.setAttribute('autoplay', '');
+			videoElement.setAttribute('playsinline', '');
 			videoElement.contentEditable = 'true';
 
 			const hiddenFileInput = document.createElement('input');
@@ -1254,7 +1258,19 @@ export default function webrtc() {
 			}
 
 			webrtc.onplaystreamrequired = () => {
-				showStart = true;
+				// Auto-retry with muted to bypass autoplay policy
+				if (videoElement && videoElement.paused) {
+					videoElement.muted = true;
+					videoElement.setAttribute('muted', '');
+					videoElement.play().then(() => {
+						showStart = false;
+						if (playButtonElement) playButtonElement.classList.add('hidden');
+					}).catch(() => {
+						showStart = true;
+					});
+				} else {
+					showStart = true;
+				}
 			}
 
 			// Actions to take whenever window changes focus
