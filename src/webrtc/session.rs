@@ -15,7 +15,7 @@ use crate::runtime_settings::RuntimeSettings;
 use crate::clipboard::ClipboardReceiver;
 use crate::web::SharedState;
 use crate::input::InputEventData;
-use log::{info, debug};
+use log::{info, debug, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -306,9 +306,32 @@ impl SessionManager {
 
                 if state == RTCPeerConnectionState::Connected {
                     let sessions_read = sessions.read().await;
-                    if let Some(session) = sessions_read.get(&session_id) {
+                    let session_arc = sessions_read.get(&session_id).cloned();
+                    if let Some(session) = session_arc.as_ref() {
                         session.set_state(SessionState::from(state)).await;
-                        runtime_settings_cb.request_keyframe();
+                    }
+                    drop(sessions_read);
+
+                    // Replay cached keyframe directly to this session,
+                    // then request a fresh keyframe from the encoder.
+                    let ss = shared_state_cb.clone();
+                    let rt = runtime_settings_cb.clone();
+                    let sid = session_id.clone();
+                    if let Some(session) = session_arc {
+                        tokio::spawn(async move {
+                            // Small delay for DTLS/SRTP to fully establish
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                            let cached = ss.get_keyframe_cache();
+                            if !cached.is_empty() {
+                                info!("Replaying {} cached keyframe packets to session {}", cached.len(), sid);
+                                for pkt in &cached {
+                                    let _ = session.write_rtp(pkt).await;
+                                }
+                            }
+                            // Also request a fresh keyframe
+                            rt.request_keyframe();
+                            info!("Keyframe request sent for session {}", sid);
+                        });
                     }
                 } else if state == RTCPeerConnectionState::Failed || state == RTCPeerConnectionState::Closed {
                     // Spawn cleanup in a separate task to avoid RwLock deadlock
@@ -424,9 +447,33 @@ impl SessionManager {
     /// Broadcast RTP packet to all connected sessions
     pub async fn broadcast_rtp(&self, packet: &[u8]) {
         let sessions = self.sessions.read().await;
+        let count = sessions.len();
+        let mut sent = 0u32;
         for session in sessions.values() {
-            if session.get_state().await == SessionState::Connected {
-                let _ = session.write_rtp(packet).await;
+            let state = session.get_state().await;
+            if state == SessionState::Connected {
+                match session.write_rtp(packet).await {
+                    Ok(_) => sent += 1,
+                    Err(e) => {
+                        warn!("broadcast_rtp: write failed for session {}: {}", session.id, e);
+                    }
+                }
+            }
+        }
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let c = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if c < 5 || c % 3000 == 0 {
+            info!("broadcast_rtp #{}: {} bytes, {} sessions, {} sent", c, packet.len(), count, sent);
+        }
+    }
+
+    /// Broadcast a text message to all connected sessions via data channel
+    pub async fn broadcast_text(&self, message: &str) {
+        let sessions = self.sessions.read().await;
+        for session in sessions.values() {
+            let state = session.get_state().await;
+            if state == SessionState::Connected {
+                let _ = session.send_to_client(message).await;
             }
         }
     }
