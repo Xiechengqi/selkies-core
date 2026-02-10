@@ -1,5 +1,6 @@
 # Build artifacts
 target/
+selkies-core-linux-amd64
 
 # IDE
 .idea/
