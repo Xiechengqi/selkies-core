@@ -127,53 +127,73 @@ impl PeerConnectionManager {
 
     /// Register video codecs in the media engine
     fn register_video_codecs(&self, media_engine: &mut MediaEngine) -> Result<(), WebRTCError> {
-        // Register H.264
-        media_engine.register_codec(
-            RTCRtpCodecParameters {
-                capability: RTCRtpCodecCapability {
-                    mime_type: MIME_TYPE_H264.to_string(),
-                    clock_rate: 90000,
-                    channels: 0,
-                    sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".to_string(),
-                    rtcp_feedback: vec![],
-                },
-                payload_type: 96,
-                ..Default::default()
-            },
-            RTPCodecType::Video,
-        ).map_err(|e| WebRTCError::ConnectionFailed(format!("Failed to register H264: {}", e)))?;
-
-        // Register VP8
-        media_engine.register_codec(
-            RTCRtpCodecParameters {
-                capability: RTCRtpCodecCapability {
-                    mime_type: MIME_TYPE_VP8.to_string(),
-                    clock_rate: 90000,
-                    channels: 0,
-                    sdp_fmtp_line: "".to_string(),
-                    rtcp_feedback: vec![],
-                },
-                payload_type: 97,
-                ..Default::default()
-            },
-            RTPCodecType::Video,
-        ).map_err(|e| WebRTCError::ConnectionFailed(format!("Failed to register VP8: {}", e)))?;
-
-        // Register VP9
-        media_engine.register_codec(
-            RTCRtpCodecParameters {
-                capability: RTCRtpCodecCapability {
-                    mime_type: MIME_TYPE_VP9.to_string(),
-                    clock_rate: 90000,
-                    channels: 0,
-                    sdp_fmtp_line: "profile-id=0".to_string(),
-                    rtcp_feedback: vec![],
-                },
-                payload_type: 98,
-                ..Default::default()
-            },
-            RTPCodecType::Video,
-        ).map_err(|e| WebRTCError::ConnectionFailed(format!("Failed to register VP9: {}", e)))?;
+        // Only advertise the configured codec to avoid SDP/stream mismatches.
+        match self.config.video_codec {
+            VideoCodec::H264 => {
+                media_engine.register_codec(
+                    RTCRtpCodecParameters {
+                        capability: RTCRtpCodecCapability {
+                            mime_type: MIME_TYPE_H264.to_string(),
+                            clock_rate: 90000,
+                            channels: 0,
+                            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".to_string(),
+                            rtcp_feedback: vec![],
+                        },
+                        payload_type: 96,
+                        ..Default::default()
+                    },
+                    RTPCodecType::Video,
+                ).map_err(|e| WebRTCError::ConnectionFailed(format!("Failed to register H264: {}", e)))?;
+            }
+            VideoCodec::VP8 => {
+                media_engine.register_codec(
+                    RTCRtpCodecParameters {
+                        capability: RTCRtpCodecCapability {
+                            mime_type: MIME_TYPE_VP8.to_string(),
+                            clock_rate: 90000,
+                            channels: 0,
+                            sdp_fmtp_line: "".to_string(),
+                            rtcp_feedback: vec![],
+                        },
+                        payload_type: 97,
+                        ..Default::default()
+                    },
+                    RTPCodecType::Video,
+                ).map_err(|e| WebRTCError::ConnectionFailed(format!("Failed to register VP8: {}", e)))?;
+            }
+            VideoCodec::VP9 => {
+                media_engine.register_codec(
+                    RTCRtpCodecParameters {
+                        capability: RTCRtpCodecCapability {
+                            mime_type: MIME_TYPE_VP9.to_string(),
+                            clock_rate: 90000,
+                            channels: 0,
+                            sdp_fmtp_line: "profile-id=0".to_string(),
+                            rtcp_feedback: vec![],
+                        },
+                        payload_type: 98,
+                        ..Default::default()
+                    },
+                    RTPCodecType::Video,
+                ).map_err(|e| WebRTCError::ConnectionFailed(format!("Failed to register VP9: {}", e)))?;
+            }
+            VideoCodec::AV1 => {
+                media_engine.register_codec(
+                    RTCRtpCodecParameters {
+                        capability: RTCRtpCodecCapability {
+                            mime_type: "video/AV1".to_string(),
+                            clock_rate: 90000,
+                            channels: 0,
+                            sdp_fmtp_line: "".to_string(),
+                            rtcp_feedback: vec![],
+                        },
+                        payload_type: 99,
+                        ..Default::default()
+                    },
+                    RTPCodecType::Video,
+                ).map_err(|e| WebRTCError::ConnectionFailed(format!("Failed to register AV1: {}", e)))?;
+            }
+        }
 
         Ok(())
     }

@@ -11,6 +11,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      SELKIES_DISABLE_DATA_CHANNEL: "1"
     strategy:
       matrix:
         include:

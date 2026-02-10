@@ -408,18 +408,25 @@ async fn handle_gstreamer_session_request(
                 }
 
                 // Create and send offer
-                if let Ok(offer_sdp) = PeerConnectionManager::create_offer(&session.peer_connection).await {
-                    let has_video = offer_sdp.contains("m=video");
-                    let has_sendonly = offer_sdp.contains("a=sendonly");
-                    info!(
-                        "Generated offer SDP (video={}, sendonly={}) for session {}",
-                        has_video, has_sendonly, session.id
-                    );
-                    let offer = SignalingMessage::Offer {
-                        sdp: offer_sdp,
-                        session_id: Some(session.id.clone()),
-                    };
-                    return format_signaling_message(&offer, WireFormat::GStreamer);
+                match PeerConnectionManager::create_offer(&session.peer_connection).await {
+                    Ok(offer_sdp) => {
+                        let has_video = offer_sdp.contains("m=video");
+                        let has_sendonly = offer_sdp.contains("a=sendonly");
+                        info!(
+                            "Generated offer SDP (video={}, sendonly={}) for session {}",
+                            has_video, has_sendonly, session.id
+                        );
+                        let offer = SignalingMessage::Offer {
+                            sdp: offer_sdp,
+                            session_id: Some(session.id.clone()),
+                        };
+                        return format_signaling_message(&offer, WireFormat::GStreamer);
+                    }
+                    Err(e) => {
+                        error!("Failed to create offer for session {}: {}", session.id, e);
+                        let error = SignalingMessage::error("OFFER_ERROR", &e.to_string(), Some(session.id.clone()));
+                        return format_signaling_message(&error, WireFormat::GStreamer);
+                    }
                 }
             }
             Err(e) => {
