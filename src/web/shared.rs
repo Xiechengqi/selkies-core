@@ -13,7 +13,7 @@ use crate::runtime_settings::RuntimeSettings;
 use base64::Engine;
 use log::{info, warn};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -46,6 +46,12 @@ pub struct SharedState {
     /// Request keyframe flag (for WebRTC)
     pub force_keyframe: Arc<AtomicBool>,
 
+    /// Request pipeline rebuild (after display resize)
+    pub pipeline_rebuild: Arc<AtomicBool>,
+
+    /// Pending display resize target (width, height); pipeline thread will apply it
+    pub pending_resize: Arc<Mutex<Option<(u32, u32)>>>,
+
     /// Runtime stats
     pub stats: Arc<Mutex<RuntimeStats>>,
 
@@ -70,6 +76,9 @@ pub struct SharedState {
 
     /// Last clipboard hash written by server (to suppress echo)
     pub last_clipboard_write_hash: Arc<Mutex<Option<u64>>>,
+
+    /// Cached keyframe RTP packets for new session replay
+    pub keyframe_cache: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
 impl std::fmt::Debug for SharedState {
@@ -105,6 +114,8 @@ impl SharedState {
             display_size,
             clipboard: Arc::new(Mutex::new(None)),
             force_keyframe: Arc::new(AtomicBool::new(false)),
+            pipeline_rebuild: Arc::new(AtomicBool::new(false)),
+            pending_resize: Arc::new(Mutex::new(None)),
             stats: Arc::new(Mutex::new(RuntimeStats::default())),
             start_time: std::time::Instant::now(),
             last_cursor_message: Arc::new(Mutex::new(None)),
@@ -113,6 +124,7 @@ impl SharedState {
             last_webrtc_stats_video: Arc::new(Mutex::new(None)),
             last_webrtc_stats_audio: Arc::new(Mutex::new(None)),
             last_clipboard_write_hash: Arc::new(Mutex::new(None)),
+            keyframe_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -231,7 +243,7 @@ impl SharedState {
         *self.last_clipboard_write_hash.lock().unwrap()
     }
 
-    /// Update display size from capture backend
+    /// Update display size
     pub fn set_display_size(&self, width: u32, height: u32) {
         let mut size = self.display_size.lock().unwrap();
         *size = (width, height);
@@ -240,6 +252,136 @@ impl SharedState {
     /// Get current display size
     pub fn display_size(&self) -> (u32, u32) {
         *self.display_size.lock().unwrap()
+    }
+
+    /// Request display resize (deferred to pipeline thread)
+    pub fn resize_display(&self, width: u32, height: u32) {
+        let current = self.display_size();
+        if current == (width, height) {
+            return;
+        }
+        // Only enlarge, never shrink (Xvfb doesn't support shrinking below output size)
+        if width <= current.0 && height <= current.1 {
+            return;
+        }
+        let target_w = width.max(current.0);
+        let target_h = height.max(current.1);
+        info!("Queuing display resize to {}x{}", target_w, target_h);
+        *self.pending_resize.lock().unwrap() = Some((target_w, target_h));
+    }
+
+    /// Take pending resize request (called by pipeline thread)
+    pub fn take_pending_resize(&self) -> Option<(u32, u32)> {
+        self.pending_resize.lock().unwrap().take()
+    }
+
+    /// Execute xrandr resize (called by pipeline thread after stopping pipeline)
+    pub fn apply_xrandr_resize(&self, width: u32, height: u32) {
+        let display = &self.config.display.display;
+        let mode_name = format!("{}x{}", width, height);
+        info!("Applying xrandr resize to {} on {}", mode_name, display);
+
+        let result = Command::new("xrandr")
+            .env("DISPLAY", display)
+            .args(["--fb", &mode_name])
+            .output();
+
+        match result {
+            Ok(ref o) if o.status.success() => {
+                info!("Display resized to {} via xrandr --fb", mode_name);
+                self.set_display_size(width, height);
+            }
+            Ok(ref o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                warn!("xrandr --fb {} failed: {}", mode_name, stderr.trim());
+            }
+            Err(e) => {
+                warn!("xrandr command failed: {}", e);
+            }
+        }
+    }
+
+    /// Add xrandr mode via cvt and apply it (fallback for real hardware)
+    fn resize_display_add_mode(&self, display: &str, output_name: &str, width: u32, height: u32) {
+        let mode_name = format!("{}x{}", width, height);
+
+        // Generate modeline with cvt
+        let cvt_output = match Command::new("cvt")
+            .args([&width.to_string(), &height.to_string()])
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                warn!("cvt not available, cannot add mode {}: {}", mode_name, e);
+                return;
+            }
+        };
+
+        let cvt_str = String::from_utf8_lossy(&cvt_output.stdout);
+        // cvt output: Modeline "WxH_60.00"  <params...>
+        let modeline = match cvt_str.lines().find(|l| l.starts_with("Modeline")) {
+            Some(line) => line,
+            None => {
+                warn!("No Modeline in cvt output: {}", cvt_str);
+                return;
+            }
+        };
+
+        // Extract params after the mode name
+        let parts: Vec<&str> = modeline.splitn(3, '"').collect();
+        if parts.len() < 3 {
+            warn!("Failed to parse cvt modeline: {}", modeline);
+            return;
+        }
+        let mode_params = parts[2].trim();
+
+        // xrandr --newmode
+        let _ = Command::new("xrandr")
+            .env("DISPLAY", display)
+            .arg("--newmode")
+            .arg(&mode_name)
+            .args(mode_params.split_whitespace())
+            .output();
+
+        // xrandr --addmode
+        let _ = Command::new("xrandr")
+            .env("DISPLAY", display)
+            .args(["--addmode", output_name, &mode_name])
+            .output();
+
+        // xrandr --output <name> --mode
+        let result = Command::new("xrandr")
+            .env("DISPLAY", display)
+            .args(["--output", output_name, "--mode", &mode_name])
+            .output();
+
+        match result {
+            Ok(o) if o.status.success() => {
+                info!("Display resized to {} via newmode", mode_name);
+                self.set_display_size(width, height);
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                warn!("xrandr --output --mode failed: {}", stderr);
+            }
+            Err(e) => warn!("xrandr command failed: {}", e),
+        }
+    }
+
+    /// Get the first connected xrandr output name
+    fn get_xrandr_output(&self, display: &str) -> Option<String> {
+        let output = Command::new("xrandr")
+            .env("DISPLAY", display)
+            .arg("--query")
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.contains(" connected") {
+                return line.split_whitespace().next().map(|s| s.to_string());
+            }
+        }
+        None
     }
 
     /// Update resource usage stats
@@ -347,14 +489,36 @@ impl SharedState {
         self.force_keyframe.swap(false, Ordering::Relaxed)
     }
 
+    /// Consume pipeline rebuild flag
+    pub fn take_pipeline_rebuild(&self) -> bool {
+        self.pipeline_rebuild.swap(false, Ordering::Relaxed)
+    }
+
     /// Broadcast an RTP packet to all WebRTC sessions
     pub fn broadcast_rtp(&self, packet: Vec<u8>) {
         let _ = self.rtp_sender.send(packet);
     }
 
+    /// Update the keyframe cache with a new set of RTP packets
+    pub fn set_keyframe_cache(&self, packets: Vec<Vec<u8>>) {
+        if let Ok(mut cache) = self.keyframe_cache.lock() {
+            *cache = packets;
+        }
+    }
+
+    /// Get a clone of the cached keyframe packets
+    pub fn get_keyframe_cache(&self) -> Vec<Vec<u8>> {
+        self.keyframe_cache.lock().map(|c| c.clone()).unwrap_or_default()
+    }
+
     /// Subscribe to RTP packets
     pub fn subscribe_rtp(&self) -> broadcast::Receiver<Vec<u8>> {
         self.rtp_sender.subscribe()
+    }
+
+    /// Subscribe to text messages (cursor, clipboard, stats)
+    pub fn subscribe_text(&self) -> broadcast::Receiver<String> {
+        self.text_sender.subscribe()
     }
 
     /// Increment WebRTC session count

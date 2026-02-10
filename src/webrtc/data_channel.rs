@@ -99,6 +99,14 @@ impl InputDataChannel {
                         return;
                     }
                     if text.starts_with("r,") {
+                        let payload = text.trim_start_matches("r,");
+                        if let Some((w, h)) = payload.split_once('x') {
+                            if let (Ok(width), Ok(height)) = (w.parse::<u32>(), h.parse::<u32>()) {
+                                if width > 0 && height > 0 && width <= 7680 && height <= 4320 {
+                                    shared_state.resize_display(width, height);
+                                }
+                            }
+                        }
                         return;
                     }
                     if text.starts_with("SET_NATIVE_CURSOR_RENDERING,") {
