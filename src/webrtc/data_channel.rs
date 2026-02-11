@@ -204,7 +204,7 @@ impl InputDataChannel {
         let mut event = InputEventData::default();
 
         match parts[0] {
-            // Mouse move: m,x,y or m,x,y,buttons
+            // Mouse move: m,x,y or m,x,y,buttons,0
             "m" => {
                 if parts.len() < 3 {
                     return Err(WebRTCError::DataChannelError("Invalid mouse move format".to_string()));
@@ -217,6 +217,27 @@ impl InputDataChannel {
                     .map_err(|_| WebRTCError::DataChannelError("Invalid mouse Y".to_string()))?;
 
                 // Optional button mask
+                if parts.len() > 3 {
+                    event.button_mask = parts[3].parse().unwrap_or(0);
+                }
+            }
+
+            // Relative mouse move: m2,dx,dy,buttons,0 (pointer lock mode)
+            "m2" => {
+                if parts.len() < 3 {
+                    return Err(WebRTCError::DataChannelError("Invalid relative mouse move format".to_string()));
+                }
+
+                event.event_type = InputEvent::MouseMove;
+                // For relative movement, read current position and add delta
+                let dx: i32 = parts[1].parse()
+                    .map_err(|_| WebRTCError::DataChannelError("Invalid mouse dX".to_string()))?;
+                let dy: i32 = parts[2].parse()
+                    .map_err(|_| WebRTCError::DataChannelError("Invalid mouse dY".to_string()))?;
+                event.mouse_x = dx;
+                event.mouse_y = dy;
+                event.text = "relative".to_string();
+
                 if parts.len() > 3 {
                     event.button_mask = parts[3].parse().unwrap_or(0);
                 }
@@ -266,6 +287,42 @@ impl InputDataChannel {
                 };
 
                 event.key_pressed = parts[2] == "1";
+            }
+
+            // Key down: kd,keysym
+            "kd" => {
+                if parts.len() < 2 {
+                    return Err(WebRTCError::DataChannelError("Invalid kd format".to_string()));
+                }
+
+                event.event_type = InputEvent::Keyboard;
+                let keysym_str = parts[1];
+                event.keysym = if keysym_str.starts_with("0x") || keysym_str.starts_with("0X") {
+                    u32::from_str_radix(&keysym_str[2..], 16)
+                        .map_err(|_| WebRTCError::DataChannelError("Invalid hex keysym".to_string()))?
+                } else {
+                    keysym_str.parse()
+                        .map_err(|_| WebRTCError::DataChannelError("Invalid keysym".to_string()))?
+                };
+                event.key_pressed = true;
+            }
+
+            // Key up: ku,keysym
+            "ku" => {
+                if parts.len() < 2 {
+                    return Err(WebRTCError::DataChannelError("Invalid ku format".to_string()));
+                }
+
+                event.event_type = InputEvent::Keyboard;
+                let keysym_str = parts[1];
+                event.keysym = if keysym_str.starts_with("0x") || keysym_str.starts_with("0X") {
+                    u32::from_str_radix(&keysym_str[2..], 16)
+                        .map_err(|_| WebRTCError::DataChannelError("Invalid hex keysym".to_string()))?
+                } else {
+                    keysym_str.parse()
+                        .map_err(|_| WebRTCError::DataChannelError("Invalid keysym".to_string()))?
+                };
+                event.key_pressed = false;
             }
 
             // Text input: t,<text>

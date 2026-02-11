@@ -116,25 +116,16 @@ impl VideoPipeline {
         let src = gst::ElementFactory::make("ximagesrc")
             .property_from_str("display-name", &config.display)
             .property("show-pointer", config.show_cursor)
-            .property("use-damage", false)  // Disable for lower latency
+            .property("use-damage", true)   // Use XDamage for incremental capture (lower CPU)
+            .property("remote", true)       // Remote display mode (reduce XShm sync overhead)
+            .property("blocksize", 16384u32) // Larger buffer for high-res capture
             .build()
             .map_err(|e| GstError::PipelineFailed(format!("Failed to create ximagesrc: {}", e)))?;
 
-        // Create videoconvert for format conversion
+        // Create videoconvert for format conversion (BGRx -> I420)
         let convert = gst::ElementFactory::make("videoconvert")
             .build()
             .map_err(|e| GstError::PipelineFailed(format!("Failed to create videoconvert: {}", e)))?;
-
-        // Create videoscale for optional scaling
-        let scale = gst::ElementFactory::make("videoscale")
-            .build()
-            .map_err(|e| GstError::PipelineFailed(format!("Failed to create videoscale: {}", e)))?;
-
-        // Create videorate for framerate control
-        let rate = gst::ElementFactory::make("videorate")
-            .property("max-rate", config.framerate as i32)
-            .build()
-            .map_err(|e| GstError::PipelineFailed(format!("Failed to create videorate: {}", e)))?;
 
         // Select and create encoder
         let encoder_selection = EncoderSelection::select(
@@ -164,35 +155,30 @@ impl VideoPipeline {
         pipeline.add_many([
             &src,
             &convert,
-            &scale,
-            &rate,
             &encoder,
             &payloader,
             appsink.upcast_ref(),
         ]).map_err(|e| GstError::PipelineFailed(format!("Failed to add elements: {}", e)))?;
 
-        // Create caps filter for framerate
-        let caps_str = if config.width > 0 && config.height > 0 {
-            format!(
-                "video/x-raw,framerate={}/1,width={},height={}",
-                config.framerate, config.width, config.height
-            )
+        // Caps to limit framerate at source level (prevents ximagesrc from capturing excess frames)
+        let src_caps_str = format!("video/x-raw,framerate={}/1", config.framerate);
+        let src_caps = src_caps_str.parse::<gst::Caps>()
+            .map_err(|e| GstError::PipelineFailed(format!("Invalid src caps: {}", e)))?;
+
+        let enc_caps_str = if config.width > 0 && config.height > 0 {
+            format!("video/x-raw,framerate={}/1,width={},height={}",
+                config.framerate, config.width, config.height)
         } else {
             format!("video/x-raw,framerate={}/1", config.framerate)
         };
+        let enc_caps = enc_caps_str.parse::<gst::Caps>()
+            .map_err(|e| GstError::PipelineFailed(format!("Invalid enc caps: {}", e)))?;
 
-        let caps = caps_str.parse::<gst::Caps>()
-            .map_err(|e| GstError::PipelineFailed(format!("Invalid caps: {}", e)))?;
-
-        // Link elements
-        src.link(&convert)
+        // Link: src -[fps cap]-> convert -[fps+size cap]-> encoder -> payloader -> appsink
+        src.link_filtered(&convert, &src_caps)
             .map_err(|e| GstError::LinkFailed(format!("src->convert: {}", e)))?;
-        convert.link(&scale)
-            .map_err(|e| GstError::LinkFailed(format!("convert->scale: {}", e)))?;
-        scale.link_filtered(&rate, &caps)
-            .map_err(|e| GstError::LinkFailed(format!("scale->rate: {}", e)))?;
-        rate.link(&encoder)
-            .map_err(|e| GstError::LinkFailed(format!("rate->encoder: {}", e)))?;
+        convert.link_filtered(&encoder, &enc_caps)
+            .map_err(|e| GstError::LinkFailed(format!("convert->encoder: {}", e)))?;
         encoder.link(&payloader)
             .map_err(|e| GstError::LinkFailed(format!("encoder->payloader: {}", e)))?;
         payloader.link(appsink.upcast_ref::<gst::Element>())
@@ -304,6 +290,11 @@ impl VideoPipeline {
     /// Pull a sample (non-blocking)
     pub fn try_pull_sample(&self) -> Option<gst::Sample> {
         self.appsink.try_pull_sample(gst::ClockTime::ZERO)
+    }
+
+    /// Pull a sample with timeout (blocks up to timeout_ms)
+    pub fn try_pull_sample_timeout(&self, timeout_ms: u64) -> Option<gst::Sample> {
+        self.appsink.try_pull_sample(gst::ClockTime::from_mseconds(timeout_ms))
     }
 
     /// Request a keyframe (IDR)

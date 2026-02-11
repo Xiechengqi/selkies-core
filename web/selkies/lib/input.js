@@ -1651,9 +1651,6 @@ export class Input {
     }
 
     _mouseButtonMovement(event) {
-        if (event.type === 'mousedown' || event.type === 'mouseup') {
-            console.log('[btn]', event.type, 'target:', event.target.id, 'mask:', this.buttonMask, 'attached:', this.inputAttached, 'trackpad:', this._trackpadMode);
-        }
         if (this.buttonMask === 0 && event.target !== this.element) {
             return;
         }
@@ -1744,10 +1741,6 @@ export class Input {
                     let logicalY_on_element = this._clientToServerY(event.clientY);
                     this.x = Math.round(logicalX_on_element);
                     this.y = Math.round(logicalY_on_element);
-                    if (!this._debugCount) this._debugCount = 0;
-                    if (this._debugCount++ % 200 === 0) {
-                        console.log('[mouse] clientY:', event.clientY, 'serverY:', this.y, 'offY:', this.m.mouseOffsetY.toFixed(1), 'multiY:', this.m.mouseMultiY.toFixed(3));
-                    }
                 } else {
                     this.x = 0; this.y = 0;
                 }
@@ -1762,9 +1755,6 @@ export class Input {
             }
         }
         var toks = [ mtype, this.x, this.y, this.buttonMask, 0 ];
-        if (event.type === 'mousedown' || event.type === 'mouseup') {
-            console.log('[click]', event.type, 'send:', toks.join(","));
-        }
         this.send(toks.join(","));
     }
 

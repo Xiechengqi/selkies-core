@@ -307,8 +307,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut collecting_keyframe = false;
             // Track the RTP timestamp of the keyframe being collected
             let mut keyframe_ts: u32 = 0;
+            let mut pipeline_paused = false;
 
             while gst_running.load(Ordering::Relaxed) {
+                // Pause pipeline when no clients are connected to save CPU
+                let session_count = gst_state.webrtc_session_count.load(Ordering::Relaxed);
+                if session_count == 0 && !pipeline_paused {
+                    info!("No WebRTC clients connected, pausing pipeline");
+                    let _ = pipeline.pause();
+                    pipeline_paused = true;
+                } else if session_count > 0 && pipeline_paused {
+                    info!("WebRTC client connected, resuming pipeline");
+                    let _ = pipeline.resume();
+                    pipeline_paused = false;
+                    pipeline.request_keyframe();
+                }
+
+                if pipeline_paused {
+                    std::thread::sleep(Duration::from_millis(200));
+                    continue;
+                }
+
                 // Check for keyframe request
                 if gst_state.take_keyframe_request() || gst_state.runtime_settings.take_keyframe_request() {
                     pipeline.request_keyframe();
@@ -353,8 +372,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                // Pull RTP packet from pipeline
-                if let Some(sample) = pipeline.try_pull_sample() {
+                // Pull RTP packet from pipeline (block up to 100ms)
+                if let Some(sample) = pipeline.try_pull_sample_timeout(100) {
                     if let Some(buffer) = sample.buffer() {
                         if let Ok(map) = buffer.map_readable() {
                             let packet = map.as_slice().to_vec();
@@ -413,8 +432,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 } else {
-                    // No packet available, sleep briefly
-                    std::thread::sleep(Duration::from_millis(1));
+                    // try_pull_sample_timeout already blocks up to 100ms, no extra sleep needed
                 }
             }
 
@@ -465,16 +483,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             while input_running.load(Ordering::Relaxed) {
-                match input_rx.try_recv() {
-                    Ok(event) => {
+                match input_rx.blocking_recv() {
+                    Some(event) => {
                         if let Err(e) = injector.process_event(event) {
                             error!("Input event failed: {}", e);
                         }
                     }
-                    Err(mpsc::error::TryRecvError::Empty) => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(mpsc::error::TryRecvError::Disconnected) => break,
+                    None => break,
                 }
             }
         }
@@ -699,7 +714,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                // Window detection (check every 1 second: 50ms * 20 = 1000ms)
+                // Window detection (check every 2 seconds: 100ms * 20 = 2000ms)
                 window_check_counter = window_check_counter.wrapping_add(1);
                 if window_check_counter % 20 == 0 {
                     if let Ok(tree_cookie) = conn.query_tree(root) {
@@ -716,7 +731,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(100));
             }
         }
         Ok::<(), String>(())

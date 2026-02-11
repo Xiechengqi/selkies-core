@@ -1226,27 +1226,6 @@ export default function webrtc() {
 					if (connectionStat.connectionFrameRate === parseInt(connectionStat.connectionFrameRate, 10))webrtc.sendDataChannelMessage(`_f,${connectionStat.connectionFrameRate}`);
 					if (connectionStat.connectionLatency === parseInt(connectionStat.connectionLatency, 10)) webrtc.sendDataChannelMessage(`_l,${connectionStat.connectionLatency}`);
 				}, 5000)
-
-				// Connect to WebSocket server to receive window_state messages
-				const wsProtocol = (location.protocol === "https:" ? "wss://" : "ws://");
-				const wsPort = window.__SELKIES_WS_PORT__ || '8080';
-				const windowStateWs = new WebSocket(`${wsProtocol}${window.location.hostname}:${wsPort}`);
-				windowStateWs.onmessage = (event) => {
-					if (typeof event.data === 'string' && event.data.startsWith('window_state,')) {
-						try {
-							const data = JSON.parse(event.data.substring(13));
-							const overlay = document.querySelector('.no-window-overlay');
-							if (overlay) {
-								overlay.classList.toggle('hidden', data.has_windows);
-							}
-						} catch (e) {
-							console.error('Error parsing window_state:', e);
-						}
-					}
-				};
-				windowStateWs.onerror = (e) => {
-					console.warn('Window state WebSocket error:', e);
-				};
 			}
 
 			webrtc.ondatachannelclose = () => {

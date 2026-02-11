@@ -180,6 +180,25 @@ impl InputInjector {
         Ok(())
     }
 
+    /// Inject relative mouse movement (pointer lock mode)
+    pub fn mouse_move_relative(&mut self, dx: i32, dy: i32) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.config.enable_mouse {
+            return Ok(());
+        }
+
+        self.mouse_x += dx;
+        self.mouse_y += dy;
+
+        // Use warp_pointer with src_window=0 for relative warp
+        let wx = self.mouse_x.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        let wy = self.mouse_y.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        self.conn
+            .warp_pointer(0u32, self.root, 0, 0, 0, 0, wx, wy)?;
+
+        self.conn.flush()?;
+        Ok(())
+    }
+
     /// Update button mask and inject press/release events for changed buttons
     fn update_button_mask(&mut self, new_mask: u32) -> Result<(), Box<dyn std::error::Error>> {
         if !self.config.enable_mouse {
@@ -334,7 +353,11 @@ impl InputInjector {
     pub fn process_event(&mut self, event: InputEventData) -> Result<(), Box<dyn std::error::Error>> {
         match event.event_type {
             InputEvent::MouseMove => {
-                self.mouse_move(event.mouse_x, event.mouse_y)?;
+                if event.text == "relative" {
+                    self.mouse_move_relative(event.mouse_x, event.mouse_y)?;
+                } else {
+                    self.mouse_move(event.mouse_x, event.mouse_y)?;
+                }
                 self.update_button_mask(event.button_mask)
             }
             InputEvent::MouseButton => self.mouse_button(event.mouse_button, event.button_pressed),
