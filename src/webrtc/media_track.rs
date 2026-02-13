@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
-use bytes::Bytes;
+use webrtc::util::marshal::Unmarshal;
 
 /// RTP packet statistics
 #[derive(Debug, Default)]
@@ -77,29 +77,32 @@ impl VideoTrackWriter {
     }
 
     /// Write an RTP packet to the track
+    ///
+    /// Parses raw bytes into an rtp::packet::Packet so that the webrtc-rs
+    /// interceptor layer can rewrite SSRC / sequence numbers to match the
+    /// negotiated values. Using raw `write()` would bypass this and cause
+    /// browsers to silently discard packets with mismatched SSRC.
     pub async fn write_rtp(&self, packet: &[u8]) -> Result<(), WebRTCError> {
-        let any_paused = self.track.any_binding_paused().await;
-        let all_paused = self.track.all_binding_paused().await;
-        if !any_paused && all_paused {
-            let count = self.no_binding_count.fetch_add(1, Ordering::Relaxed) + 1;
-            if count <= 5 || count % 1000 == 0 {
-                warn!("RTP write skipped ({}): no track bindings", count);
-            }
-            self.stats.record_dropped();
-            return Ok(());
-        }
-        if all_paused {
-            let count = self.paused_count.fetch_add(1, Ordering::Relaxed) + 1;
-            if count <= 5 || count % 1000 == 0 {
-                warn!("RTP write skipped ({}): track sender paused", count);
-            }
-            self.stats.record_dropped();
-            return Ok(());
+        if packet.len() < 12 {
+            return Ok(()); // Too small to be a valid RTP packet
         }
 
-        let bytes = Bytes::copy_from_slice(packet);
+        let mut buf = &packet[..];
+        let rtp_packet = webrtc::rtp::packet::Packet::unmarshal(&mut buf)
+            .map_err(|e| WebRTCError::MediaError(format!("RTP unmarshal: {}", e)))?;
 
-        match self.track.write(&bytes).await {
+        // Diagnostic: check paused state
+        let sent_count = self.stats.packets_sent.load(Ordering::Relaxed);
+        if sent_count < 5 || sent_count % 1000 == 0 {
+            let any_paused = self.track.any_binding_paused().await;
+            let all_paused = self.track.all_binding_paused().await;
+            log::debug!(
+                "write_rtp: pkt {} bytes, any_paused={}, all_paused={}, total_sent={}",
+                packet.len(), any_paused, all_paused, sent_count
+            );
+        }
+
+        match self.track.write_rtp(&rtp_packet).await {
             Ok(n) => {
                 self.stats.record_sent(n);
                 Ok(())

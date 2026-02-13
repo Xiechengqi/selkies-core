@@ -38,13 +38,13 @@ pub async fn run_http_server_with_webrtc(
     let addr = format!("0.0.0.0:{}", port);
 
     // Check for embedded assets first, then fall back to filesystem
-    let use_embedded = has_embedded_assets() && std::env::var("SELKIES_WEB_ROOT").is_err();
+    let use_embedded = has_embedded_assets() && std::env::var("IVNC_WEB_ROOT").is_err();
 
     if use_embedded {
         info!("Serving web UI from embedded assets");
     } else {
-        let static_root = std::env::var("SELKIES_WEB_ROOT")
-            .unwrap_or_else(|_| "web/selkies".to_string());
+        let static_root = std::env::var("IVNC_WEB_ROOT")
+            .unwrap_or_else(|_| "web/ivnc".to_string());
         let cwd = std::env::current_dir().ok();
         let index_path = PathBuf::from(&static_root).join("index.html");
         info!(
@@ -95,8 +95,8 @@ pub async fn run_http_server_with_webrtc(
         app.fallback(embedded_fallback_handler)
             .with_state(state)
     } else {
-        let static_root = std::env::var("SELKIES_WEB_ROOT")
-            .unwrap_or_else(|_| "web/selkies".to_string());
+        let static_root = std::env::var("IVNC_WEB_ROOT")
+            .unwrap_or_else(|_| "web/ivnc".to_string());
         let index_path = PathBuf::from(&static_root).join("index.html");
         let static_service = ServeDir::new(&static_root).fallback(ServeFile::new(index_path));
         app.fallback_service(static_service)
@@ -140,45 +140,45 @@ async fn metrics_handler(State(state): State<Arc<SharedState>>) -> String {
     let stats = state.stats.lock().unwrap().clone();
 
     format!(
-        r#"# HELP selkies_core_uptime_seconds Server uptime in seconds
-# TYPE selkies_core_uptime_seconds counter
-selkies_core_uptime_seconds {}
-# HELP selkies_core_connections Current number of connections
-# TYPE selkies_core_connections gauge
-selkies_core_connections {}
-# HELP selkies_core_cpu_percent Process CPU usage percent
-# TYPE selkies_core_cpu_percent gauge
-selkies_core_cpu_percent {}
-# HELP selkies_core_mem_bytes Process RSS in bytes
-# TYPE selkies_core_mem_bytes gauge
-selkies_core_mem_bytes {}
-# HELP selkies_core_client_latency_ms Client-reported latency in ms
-# TYPE selkies_core_client_latency_ms gauge
-selkies_core_client_latency_ms {}
-# HELP selkies_core_client_fps Client-reported FPS
-# TYPE selkies_core_client_fps gauge
-selkies_core_client_fps {}
-# HELP selkies_core_ice_candidates_total Total ICE candidates observed
-# TYPE selkies_core_ice_candidates_total counter
-selkies_core_ice_candidates_total {}
-# HELP selkies_core_ice_candidates_udp Total ICE candidates over UDP
-# TYPE selkies_core_ice_candidates_udp counter
-selkies_core_ice_candidates_udp {}
-# HELP selkies_core_ice_candidates_tcp Total ICE candidates over TCP
-# TYPE selkies_core_ice_candidates_tcp counter
-selkies_core_ice_candidates_tcp {}
-# HELP selkies_core_ice_candidates_host Total ICE candidates of type host
-# TYPE selkies_core_ice_candidates_host counter
-selkies_core_ice_candidates_host {}
-# HELP selkies_core_ice_candidates_srflx Total ICE candidates of type srflx
-# TYPE selkies_core_ice_candidates_srflx counter
-selkies_core_ice_candidates_srflx {}
-# HELP selkies_core_ice_candidates_relay Total ICE candidates of type relay
-# TYPE selkies_core_ice_candidates_relay counter
-selkies_core_ice_candidates_relay {}
-# HELP selkies_core_ice_candidates_prflx Total ICE candidates of type prflx
-# TYPE selkies_core_ice_candidates_prflx counter
-selkies_core_ice_candidates_prflx {}
+        r#"# HELP ivnc_uptime_seconds Server uptime in seconds
+# TYPE ivnc_uptime_seconds counter
+ivnc_uptime_seconds {}
+# HELP ivnc_connections Current number of connections
+# TYPE ivnc_connections gauge
+ivnc_connections {}
+# HELP ivnc_cpu_percent Process CPU usage percent
+# TYPE ivnc_cpu_percent gauge
+ivnc_cpu_percent {}
+# HELP ivnc_mem_bytes Process RSS in bytes
+# TYPE ivnc_mem_bytes gauge
+ivnc_mem_bytes {}
+# HELP ivnc_client_latency_ms Client-reported latency in ms
+# TYPE ivnc_client_latency_ms gauge
+ivnc_client_latency_ms {}
+# HELP ivnc_client_fps Client-reported FPS
+# TYPE ivnc_client_fps gauge
+ivnc_client_fps {}
+# HELP ivnc_ice_candidates_total Total ICE candidates observed
+# TYPE ivnc_ice_candidates_total counter
+ivnc_ice_candidates_total {}
+# HELP ivnc_ice_candidates_udp Total ICE candidates over UDP
+# TYPE ivnc_ice_candidates_udp counter
+ivnc_ice_candidates_udp {}
+# HELP ivnc_ice_candidates_tcp Total ICE candidates over TCP
+# TYPE ivnc_ice_candidates_tcp counter
+ivnc_ice_candidates_tcp {}
+# HELP ivnc_ice_candidates_host Total ICE candidates of type host
+# TYPE ivnc_ice_candidates_host counter
+ivnc_ice_candidates_host {}
+# HELP ivnc_ice_candidates_srflx Total ICE candidates of type srflx
+# TYPE ivnc_ice_candidates_srflx counter
+ivnc_ice_candidates_srflx {}
+# HELP ivnc_ice_candidates_relay Total ICE candidates of type relay
+# TYPE ivnc_ice_candidates_relay counter
+ivnc_ice_candidates_relay {}
+# HELP ivnc_ice_candidates_prflx Total ICE candidates of type prflx
+# TYPE ivnc_ice_candidates_prflx counter
+ivnc_ice_candidates_prflx {}
 "#,
         uptime,
         clients,
@@ -236,7 +236,7 @@ async fn basic_auth_middleware(
         .unwrap_or_else(|_| Response::new(Body::empty()));
     response.headers_mut().insert(
         header::WWW_AUTHENTICATE,
-        header::HeaderValue::from_static("Basic realm=\"selkies-core\""),
+        header::HeaderValue::from_static("Basic realm=\"ivnc\""),
     );
     response
 }
@@ -285,15 +285,15 @@ async fn turn_config_handler(State(state): State<Arc<SharedState>>) -> Response 
 
 async fn index_handler(State(_state): State<Arc<SharedState>>) -> Response {
     // Check for embedded assets first, then fall back to filesystem
-    let use_embedded = has_embedded_assets() && std::env::var("SELKIES_WEB_ROOT").is_err();
+    let use_embedded = has_embedded_assets() && std::env::var("IVNC_WEB_ROOT").is_err();
 
     if use_embedded {
         return get_embedded_file("index.html");
     }
 
     // Fallback to filesystem
-    let static_root = std::env::var("SELKIES_WEB_ROOT")
-        .unwrap_or_else(|_| "web/selkies".to_string());
+    let static_root = std::env::var("IVNC_WEB_ROOT")
+        .unwrap_or_else(|_| "web/ivnc".to_string());
     let index_path = PathBuf::from(&static_root).join("index.html");
     match tokio::fs::read(&index_path).await {
         Ok(data) => {
@@ -354,7 +354,7 @@ fn build_ice_servers(config: &crate::config::WebRTCConfig) -> Vec<crate::config:
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() + ttl_secs)
                 .unwrap_or(ttl_secs);
-            let user = format!("{}:selkies", expiry);
+            let user = format!("{}:ivnc", expiry);
             let password = hmac_sha1_base64(&config.turn_shared_secret, &user);
             (Some(user), Some(password))
         } else if !config.turn_username.is_empty() && !config.turn_password.is_empty() {
@@ -384,3 +384,4 @@ fn hmac_sha1_base64(secret: &str, message: &str) -> String {
     let result = mac.finalize().into_bytes();
     base64::engine::general_purpose::STANDARD.encode(result)
 }
+

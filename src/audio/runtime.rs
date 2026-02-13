@@ -16,6 +16,7 @@ pub struct AudioConfig {
 }
 
 impl AudioConfig {
+    #[allow(dead_code)]
     pub fn with_bitrate(&self, bitrate: u32) -> Self {
         Self {
             sample_rate: self.sample_rate,
@@ -27,6 +28,7 @@ impl AudioConfig {
 
 /// Encoded audio packet
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AudioPacket {
     pub data: Vec<u8>,
 }
@@ -198,16 +200,22 @@ pub fn run_audio_capture(
         channels: config.channels as u8,
     };
 
+    // Try monitor source of default sink first (captures application audio),
+    // then fall back to PULSE_SOURCE env var, then default source.
+    let source = std::env::var("PULSE_SOURCE").ok();
+    let source_ref = source.as_deref();
+
     let simple = Simple::new(
         None,
-        "selkies-core",
+        "ivnc",
         Direction::Record,
-        None,
+        source_ref,
         "capture",
         &spec,
         None,
         None,
     )?;
+    log::info!("PulseAudio capture opened (source: {:?})", source_ref);
 
     let mut encoder = Encoder::new(config.sample_rate, channels, Application::Audio)?;
     encoder.set_bitrate(Bitrate::Bits(config.bitrate as i32))?;
@@ -232,7 +240,7 @@ pub fn run_audio_capture(
 fn encode_ready_frames(
     encoder: &mut opus::Encoder,
     buffer: &mut std::collections::VecDeque<i16>,
-    frame_size: usize,
+    _frame_size: usize,
     samples_per_frame: usize,
     sender: &broadcast::Sender<AudioPacket>,
 ) {
@@ -244,7 +252,7 @@ fn encode_ready_frames(
             }
         }
         let mut out = vec![0u8; 4000];
-        if let Ok(len) = encoder.encode(&frame, frame_size, &mut out) {
+        if let Ok(len) = encoder.encode(&frame, &mut out) {
             out.truncate(len);
             let _ = sender.send(AudioPacket { data: out });
         }

@@ -1,26 +1,26 @@
 version: '3.8'
 
 services:
-  selkies-core:
+  ivnc:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: selkies-core
+    container_name: ivnc
     ports:
       - "8000:8000"
       - "8080:8080"
     environment:
       - DISPLAY=:99
-      - SELKIES_LOG=info
+      - IVNC_LOG=info
     volumes:
-      - ./config.toml:/etc/selkies-core.toml:ro
+      - ./config.toml:/etc/ivnc.toml:ro
     restart: unless-stopped
     networks:
-      - selkies-net
+      - ivnc-net
 
   xvfb:
     image: ubuntu:22.04
-    container_name: selkies-xvfb
+    container_name: ivnc-xvfb
     command: >
       bash -c "apt-get update &&
                apt-get install -y xvfb openbox x11-apps &&
@@ -31,8 +31,8 @@ services:
     environment:
       - DISPLAY=:99
     networks:
-      - selkies-net
+      - ivnc-net
 
 networks:
-  selkies-net:
+  ivnc-net:
     driver: bridge

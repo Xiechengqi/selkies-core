@@ -47,6 +47,7 @@ impl FileUploadHandler {
         }
     }
 
+    #[allow(dead_code)]
     pub fn from_config(config: &Config) -> Self {
         Self::new(FileUploadSettings::from_config(config))
     }

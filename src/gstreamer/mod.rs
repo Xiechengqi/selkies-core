@@ -1,11 +1,10 @@
-//! GStreamer integration for video capture and encoding
+//! GStreamer integration for video encoding
 //!
-//! This module provides GStreamer-based video pipeline for capturing X11 screens
-//! and encoding to H.264/VP8/VP9 for WebRTC streaming.
+//! This module provides GStreamer-based video pipeline using appsrc
+//! for encoding compositor frames to H.264/VP8/VP9 for WebRTC streaming.
 
 pub mod pipeline;
 pub mod encoder;
-pub mod capture;
 
 pub use pipeline::{VideoPipeline, PipelineConfig};
 
@@ -47,6 +46,7 @@ impl fmt::Display for GstError {
 impl Error for GstError {}
 
 /// Initialize GStreamer subsystem
+#[allow(dead_code)]
 pub fn init() -> Result<(), GstError> {
     gstreamer::init().map_err(|e| GstError::InitFailed(e.to_string()))
 }

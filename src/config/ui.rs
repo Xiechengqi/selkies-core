@@ -87,17 +87,17 @@ pub struct UiValueU32 {
 impl UiConfig {
     pub fn from_env(config: &Config) -> Self {
         let ui = UiVisibility {
-            show_sidebar: env_bool("SELKIES_UI_SHOW_SIDEBAR", true).value,
-            show_video_settings: env_bool("SELKIES_UI_SIDEBAR_SHOW_VIDEO_SETTINGS", true).value,
-            show_screen_settings: env_bool("SELKIES_UI_SIDEBAR_SHOW_SCREEN_SETTINGS", true).value,
-            show_audio_settings: env_bool("SELKIES_UI_SIDEBAR_SHOW_AUDIO_SETTINGS", true).value,
-            show_stats: env_bool("SELKIES_UI_SIDEBAR_SHOW_STATS", true).value,
-            show_clipboard: env_bool("SELKIES_UI_SIDEBAR_SHOW_CLIPBOARD", true).value,
+            show_sidebar: env_bool("IVNC_UI_SHOW_SIDEBAR", true).value,
+            show_video_settings: env_bool("IVNC_UI_SIDEBAR_SHOW_VIDEO_SETTINGS", true).value,
+            show_screen_settings: env_bool("IVNC_UI_SIDEBAR_SHOW_SCREEN_SETTINGS", true).value,
+            show_audio_settings: env_bool("IVNC_UI_SIDEBAR_SHOW_AUDIO_SETTINGS", true).value,
+            show_stats: env_bool("IVNC_UI_SIDEBAR_SHOW_STATS", true).value,
+            show_clipboard: env_bool("IVNC_UI_SIDEBAR_SHOW_CLIPBOARD", true).value,
         };
 
-        let encoder = env_encoder("SELKIES_ENCODER");
+        let encoder = env_encoder("IVNC_ENCODER");
         let framerate = env_range_u32(
-            "SELKIES_FRAMERATE",
+            "IVNC_FRAMERATE",
             config.encoding.target_fps,
             1,
             config.encoding.max_fps.max(1),
@@ -108,18 +108,18 @@ impl UiConfig {
             config.display.height,
         );
 
-        let audio_enabled = env_bool("SELKIES_AUDIO_ENABLED", config.audio.enabled);
+        let audio_enabled = env_bool("IVNC_AUDIO_ENABLED", config.audio.enabled);
         let audio_bitrate = env_range_u32(
-            "SELKIES_AUDIO_BITRATE",
+            "IVNC_AUDIO_BITRATE",
             config.audio.bitrate,
             64_000,
             320_000,
         );
 
-        let mouse = env_bool("SELKIES_MOUSE_ENABLED", config.input.enable_mouse);
-        let keyboard = env_bool("SELKIES_KEYBOARD_ENABLED", config.input.enable_keyboard);
+        let mouse = env_bool("IVNC_MOUSE_ENABLED", config.input.enable_mouse);
+        let keyboard = env_bool("IVNC_KEYBOARD_ENABLED", config.input.enable_keyboard);
 
-        let clipboard_enabled = env_bool("SELKIES_CLIPBOARD_ENABLED", config.input.enable_clipboard);
+        let clipboard_enabled = env_bool("IVNC_CLIPBOARD_ENABLED", config.input.enable_clipboard);
 
         UiConfig {
             version: "1".to_string(),
@@ -247,41 +247,41 @@ fn env_manual_resolution(default_width: u32, default_height: u32) -> (UiBool, Ui
     let mut width = default_width;
     let mut height = default_height;
 
-    if let Ok(raw) = env::var("SELKIES_MANUAL_WIDTH") {
+    if let Ok(raw) = env::var("IVNC_MANUAL_WIDTH") {
         if let Ok(value) = raw.parse::<u32>() {
             width = value;
             enabled = true;
             locked = true;
         } else {
-            warn!("Invalid SELKIES_MANUAL_WIDTH: {}", raw);
+            warn!("Invalid IVNC_MANUAL_WIDTH: {}", raw);
         }
     }
 
-    if let Ok(raw) = env::var("SELKIES_MANUAL_HEIGHT") {
+    if let Ok(raw) = env::var("IVNC_MANUAL_HEIGHT") {
         if let Ok(value) = raw.parse::<u32>() {
             height = value;
             enabled = true;
             locked = true;
         } else {
-            warn!("Invalid SELKIES_MANUAL_HEIGHT: {}", raw);
+            warn!("Invalid IVNC_MANUAL_HEIGHT: {}", raw);
         }
     }
 
-    if let Ok(raw) = env::var("SELKIES_IS_MANUAL_RESOLUTION_MODE") {
+    if let Ok(raw) = env::var("IVNC_IS_MANUAL_RESOLUTION_MODE") {
         let (value_raw, _locked_hint) = split_locked(&raw);
         match value_raw.to_ascii_lowercase().as_str() {
             "true" | "1" => {
                 enabled = true;
                 locked = true;
-                if env::var("SELKIES_MANUAL_WIDTH").is_err()
-                    && env::var("SELKIES_MANUAL_HEIGHT").is_err()
+                if env::var("IVNC_MANUAL_WIDTH").is_err()
+                    && env::var("IVNC_MANUAL_HEIGHT").is_err()
                 {
                     width = 1024;
                     height = 768;
                 }
             }
             "false" | "0" => {}
-            _ => warn!("Invalid SELKIES_IS_MANUAL_RESOLUTION_MODE: {}", value_raw),
+            _ => warn!("Invalid IVNC_IS_MANUAL_RESOLUTION_MODE: {}", value_raw),
         }
     }
 

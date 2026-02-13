@@ -1,19 +1,23 @@
-# Selkies Core Configuration Example
+# iVnc Configuration Example
 # Copy this file to config.toml and customize as needed
 
 [server]
 # Run in foreground (true) or daemonize (false)
 foreground = true
+# PID file path
+pidfile = "/var/run/ivnc.pid"
 
 [display]
-# X11 display to capture (e.g., ":0", ":1")
-display = ":0"
-# Display width (0 = auto-detect)
-width = 0
-# Display height (0 = auto-detect)
-height = 0
+# Display width
+width = 1920
+# Display height
+height = 1080
+# Refresh rate in Hz
+refresh_rate = 60
 
 [http]
+# HTTP server bind address
+host = "0.0.0.0"
 # HTTP server port (for health checks and WebRTC signaling)
 port = 8000
 # Enable HTTP basic authentication
@@ -49,7 +53,7 @@ mouse_sensitivity = 1.0
 
 [audio]
 # Enable audio streaming
-enabled = false
+enabled = true
 # Audio sample rate (Hz)
 sample_rate = 48000
 # Number of audio channels (1 = mono, 2 = stereo)
@@ -61,7 +65,7 @@ bitrate = 128000
 # Log level: "trace", "debug", "info", "warn", "error"
 level = "info"
 # Optional log file path (comment out for stdout only)
-# logfile = "/var/log/selkies-core.log"
+# logfile = "/var/log/ivnc.log"
 # Log format: "json" or "text"
 format = "json"
 
@@ -81,13 +85,13 @@ ice_trickle = true
 video_codec = "h264"
 
 # Target video bitrate in kbps
-video_bitrate = 4000
+video_bitrate = 8000
 
 # Maximum video bitrate in kbps
-video_bitrate_max = 8000
+video_bitrate_max = 16000
 
 # Minimum video bitrate in kbps
-video_bitrate_min = 500
+video_bitrate_min = 1000
 
 # Hardware encoder: "auto", "software", "vaapi", "nvenc", "qsv"
 # - auto: Automatically detect best available encoder

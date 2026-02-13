@@ -1,4 +1,4 @@
-//! Shared state for selkies-core
+//! Shared state for ivnc
 //!
 //! Manages shared configuration and WebRTC sessions.
 
@@ -13,7 +13,7 @@ use crate::runtime_settings::RuntimeSettings;
 use base64::Engine;
 use log::{info, warn};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -77,6 +77,13 @@ pub struct SharedState {
     /// Last clipboard hash written by server (to suppress echo)
     pub last_clipboard_write_hash: Arc<Mutex<Option<u64>>>,
 
+    /// Flag: browser sent new clipboard content, compositor should pick it up
+    pub clipboard_incoming_dirty: Arc<AtomicBool>,
+
+    /// Channel for browser→compositor clipboard content (replaces dirty flag for new data)
+    pub clipboard_incoming_tx: mpsc::UnboundedSender<String>,
+    pub clipboard_incoming_rx: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,
+
     /// Cached keyframe RTP packets for new session replay
     pub keyframe_cache: Arc<Mutex<Vec<Vec<u8>>>>,
 }
@@ -102,6 +109,7 @@ impl SharedState {
         let (rtp_sender, _) = broadcast::channel(2000);
         let (audio_sender, _) = broadcast::channel(500);
         let (text_sender, _) = broadcast::channel(256);
+        let (clipboard_incoming_tx, clipboard_incoming_rx) = mpsc::unbounded_channel();
         let display_size = Arc::new(Mutex::new((config.display.width, config.display.height)));
 
         Self {
@@ -124,6 +132,9 @@ impl SharedState {
             last_webrtc_stats_video: Arc::new(Mutex::new(None)),
             last_webrtc_stats_audio: Arc::new(Mutex::new(None)),
             last_clipboard_write_hash: Arc::new(Mutex::new(None)),
+            clipboard_incoming_dirty: Arc::new(AtomicBool::new(false)),
+            clipboard_incoming_tx,
+            clipboard_incoming_rx: Arc::new(Mutex::new(clipboard_incoming_rx)),
             keyframe_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -254,134 +265,19 @@ impl SharedState {
         *self.display_size.lock().unwrap()
     }
 
-    /// Request display resize (deferred to pipeline thread)
+    /// Request display resize
     pub fn resize_display(&self, width: u32, height: u32) {
         let current = self.display_size();
         if current == (width, height) {
             return;
         }
-        // Only enlarge, never shrink (Xvfb doesn't support shrinking below output size)
-        if width <= current.0 && height <= current.1 {
-            return;
-        }
-        let target_w = width.max(current.0);
-        let target_h = height.max(current.1);
-        info!("Queuing display resize to {}x{}", target_w, target_h);
-        *self.pending_resize.lock().unwrap() = Some((target_w, target_h));
+        info!("Queuing display resize to {}x{}", width, height);
+        *self.pending_resize.lock().unwrap() = Some((width, height));
     }
 
-    /// Take pending resize request (called by pipeline thread)
+    /// Take pending resize request (called by compositor thread)
     pub fn take_pending_resize(&self) -> Option<(u32, u32)> {
         self.pending_resize.lock().unwrap().take()
-    }
-
-    /// Execute xrandr resize (called by pipeline thread after stopping pipeline)
-    pub fn apply_xrandr_resize(&self, width: u32, height: u32) {
-        let display = &self.config.display.display;
-        let mode_name = format!("{}x{}", width, height);
-        info!("Applying xrandr resize to {} on {}", mode_name, display);
-
-        let result = Command::new("xrandr")
-            .env("DISPLAY", display)
-            .args(["--fb", &mode_name])
-            .output();
-
-        match result {
-            Ok(ref o) if o.status.success() => {
-                info!("Display resized to {} via xrandr --fb", mode_name);
-                self.set_display_size(width, height);
-            }
-            Ok(ref o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                warn!("xrandr --fb {} failed: {}", mode_name, stderr.trim());
-            }
-            Err(e) => {
-                warn!("xrandr command failed: {}", e);
-            }
-        }
-    }
-
-    /// Add xrandr mode via cvt and apply it (fallback for real hardware)
-    fn resize_display_add_mode(&self, display: &str, output_name: &str, width: u32, height: u32) {
-        let mode_name = format!("{}x{}", width, height);
-
-        // Generate modeline with cvt
-        let cvt_output = match Command::new("cvt")
-            .args([&width.to_string(), &height.to_string()])
-            .output()
-        {
-            Ok(o) => o,
-            Err(e) => {
-                warn!("cvt not available, cannot add mode {}: {}", mode_name, e);
-                return;
-            }
-        };
-
-        let cvt_str = String::from_utf8_lossy(&cvt_output.stdout);
-        // cvt output: Modeline "WxH_60.00"  <params...>
-        let modeline = match cvt_str.lines().find(|l| l.starts_with("Modeline")) {
-            Some(line) => line,
-            None => {
-                warn!("No Modeline in cvt output: {}", cvt_str);
-                return;
-            }
-        };
-
-        // Extract params after the mode name
-        let parts: Vec<&str> = modeline.splitn(3, '"').collect();
-        if parts.len() < 3 {
-            warn!("Failed to parse cvt modeline: {}", modeline);
-            return;
-        }
-        let mode_params = parts[2].trim();
-
-        // xrandr --newmode
-        let _ = Command::new("xrandr")
-            .env("DISPLAY", display)
-            .arg("--newmode")
-            .arg(&mode_name)
-            .args(mode_params.split_whitespace())
-            .output();
-
-        // xrandr --addmode
-        let _ = Command::new("xrandr")
-            .env("DISPLAY", display)
-            .args(["--addmode", output_name, &mode_name])
-            .output();
-
-        // xrandr --output <name> --mode
-        let result = Command::new("xrandr")
-            .env("DISPLAY", display)
-            .args(["--output", output_name, "--mode", &mode_name])
-            .output();
-
-        match result {
-            Ok(o) if o.status.success() => {
-                info!("Display resized to {} via newmode", mode_name);
-                self.set_display_size(width, height);
-            }
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                warn!("xrandr --output --mode failed: {}", stderr);
-            }
-            Err(e) => warn!("xrandr command failed: {}", e),
-        }
-    }
-
-    /// Get the first connected xrandr output name
-    fn get_xrandr_output(&self, display: &str) -> Option<String> {
-        let output = Command::new("xrandr")
-            .env("DISPLAY", display)
-            .arg("--query")
-            .output()
-            .ok()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            if line.contains(" connected") {
-                return line.split_whitespace().next().map(|s| s.to_string());
-            }
-        }
-        None
     }
 
     /// Update resource usage stats
@@ -519,6 +415,11 @@ impl SharedState {
     /// Subscribe to text messages (cursor, clipboard, stats)
     pub fn subscribe_text(&self) -> broadcast::Receiver<String> {
         self.text_sender.subscribe()
+    }
+
+    /// Subscribe to audio packets
+    pub fn subscribe_audio(&self) -> broadcast::Receiver<AudioPacket> {
+        self.audio_sender.subscribe()
     }
 
     /// Increment WebRTC session count

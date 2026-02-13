@@ -90,6 +90,9 @@ impl PeerConnectionManager {
         // Register video codecs based on configuration
         self.register_video_codecs(&mut media_engine)?;
 
+        // Register Opus audio codec
+        self.register_audio_codec(&mut media_engine)?;
+
         // Create interceptor registry for RTCP feedback
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut media_engine)
@@ -123,6 +126,43 @@ impl PeerConnectionManager {
             .map_err(|e| WebRTCError::ConnectionFailed(format!("Failed to create peer connection: {}", e)))?;
 
         Ok(Arc::new(peer_connection))
+    }
+
+    /// Register Opus audio codec in the media engine
+    fn register_audio_codec(&self, media_engine: &mut MediaEngine) -> Result<(), WebRTCError> {
+        use webrtc::api::media_engine::MIME_TYPE_OPUS;
+        media_engine.register_codec(
+            RTCRtpCodecParameters {
+                capability: RTCRtpCodecCapability {
+                    mime_type: MIME_TYPE_OPUS.to_string(),
+                    clock_rate: 48000,
+                    channels: 2,
+                    sdp_fmtp_line: "minptime=10;useinbandfec=1".to_string(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 111,
+                ..Default::default()
+            },
+            RTPCodecType::Audio,
+        ).map_err(|e| WebRTCError::ConnectionFailed(format!("Failed to register Opus: {}", e)))?;
+        Ok(())
+    }
+
+    /// Create an audio track for Opus
+    pub fn create_audio_track(&self) -> Result<Arc<TrackLocalStaticRTP>, WebRTCError> {
+        use webrtc::api::media_engine::MIME_TYPE_OPUS;
+        let track = TrackLocalStaticRTP::new(
+            RTCRtpCodecCapability {
+                mime_type: MIME_TYPE_OPUS.to_string(),
+                clock_rate: 48000,
+                channels: 2,
+                sdp_fmtp_line: "minptime=10;useinbandfec=1".to_string(),
+                rtcp_feedback: vec![],
+            },
+            format!("audio-{}", uuid::Uuid::new_v4()),
+            "ivnc-stream".to_string(),
+        );
+        Ok(Arc::new(track))
     }
 
     /// Register video codecs in the media engine
@@ -216,7 +256,7 @@ impl PeerConnectionManager {
                 rtcp_feedback: vec![],
             },
             format!("video-{}", uuid::Uuid::new_v4()),
-            "selkies-stream".to_string(),
+            "ivnc-stream".to_string(),
         );
 
         Ok(Arc::new(track))
@@ -403,7 +443,7 @@ fn build_ice_servers(config: &WebRTCConfig) -> Vec<crate::config::IceServerConfi
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() + ttl_secs)
                 .unwrap_or(ttl_secs);
-            let user = format!("{}:selkies", expiry);
+            let user = format!("{}:ivnc", expiry);
             let password = hmac_sha1_base64(&config.turn_shared_secret, &user);
             (Some(user), Some(password))
         } else if !config.turn_username.is_empty() && !config.turn_password.is_empty() {

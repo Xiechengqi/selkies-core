@@ -4,13 +4,13 @@ use std::path::PathBuf;
 use crate::config;
 
 #[derive(Parser, Debug)]
-#[command(name = "selkies-core")]
-#[command(author = "Selkies Team")]
+#[command(name = "ivnc")]
+#[command(author = "iVnc Team")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
-#[command(about = "Rust-based Selkies streaming core", long_about = None)]
+#[command(about = "iVnc streaming core", long_about = None)]
 pub struct Args {
     /// Configuration file path
-    #[arg(short, long, default_value = "/etc/selkies-core.toml")]
+    #[arg(short, long, default_value = "/etc/ivnc.toml")]
     pub config: PathBuf,
 
     /// Display width
@@ -20,10 +20,6 @@ pub struct Args {
     /// Display height
     #[arg(long, default_value = "1080")]
     pub height: u32,
-
-    /// Display number (X11 display)
-    #[arg(short, long, default_value = ":0")]
-    pub display: String,
 
     /// HTTP port for health/UI
     #[arg(long)]
@@ -130,24 +126,8 @@ pub struct Args {
     pub foreground: bool,
 
     /// PID file path
-    #[arg(long, default_value = "/var/run/selkies-core.pid")]
+    #[arg(long, default_value = "/var/run/ivnc.pid")]
     pub pidfile: PathBuf,
-
-    /// Disable automatic X11 display management
-    #[arg(long, action)]
-    pub no_auto_x11: bool,
-
-    /// Force X11 backend (auto, xvfb, xdummy, or none)
-    #[arg(long)]
-    pub x11_backend: Option<String>,
-
-    /// X11 display number range for auto-allocation (e.g., "99-199")
-    #[arg(long)]
-    pub x11_display_range: Option<String>,
-
-    /// Timeout for X11 startup in seconds
-    #[arg(long)]
-    pub x11_startup_timeout: Option<u64>,
 }
 
 impl Args {

@@ -73,10 +73,8 @@ impl ClipboardReceiver {
     fn handle_single_text(&self, base64_payload: &str) {
         match decode_base64(base64_payload) {
             Some(bytes) => {
-                if system_clipboard::write("text/plain", &bytes) {
-                    self.state.mark_clipboard_written("text/plain", &bytes);
-                }
-                let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let _ = self.state.clipboard_incoming_tx.send(encoded.clone());
                 self.state.set_clipboard(encoded);
             }
             None => warn!("Failed to decode clipboard text payload"),
@@ -176,6 +174,7 @@ impl ClipboardReceiver {
                 self.state.mark_clipboard_written("text/plain", &buffer);
             }
             let encoded = base64::engine::general_purpose::STANDARD.encode(buffer);
+            let _ = self.state.clipboard_incoming_tx.send(encoded.clone());
             self.state.set_clipboard(encoded);
         }
         self.reset();

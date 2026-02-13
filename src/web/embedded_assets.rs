@@ -12,7 +12,7 @@ use rust_embed::RustEmbed;
 
 /// Embedded web UI assets from the Vite build output
 #[derive(RustEmbed)]
-#[folder = "web/selkies/dist"]
+#[folder = "web/ivnc/dist"]
 pub struct WebAssets;
 
 /// Get an embedded file and return it as an Axum response

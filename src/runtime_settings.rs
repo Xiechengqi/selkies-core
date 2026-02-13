@@ -30,6 +30,7 @@ impl RuntimeSettings {
         }
     }
 
+    #[allow(dead_code)]
     pub fn target_fps(&self) -> u32 {
         self.target_fps.load(Ordering::Relaxed)
     }
@@ -42,6 +43,7 @@ impl RuntimeSettings {
         self.video_bitrate_kbps.load(Ordering::Relaxed)
     }
 
+    #[allow(dead_code)]
     pub fn audio_bitrate(&self) -> u32 {
         self.audio_bitrate.load(Ordering::Relaxed)
     }
@@ -79,6 +81,7 @@ impl RuntimeSettings {
         self.keyframe_request.store(true, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     pub fn take_audio_bitrate_update(&self) -> Option<u32> {
         if self.audio_bitrate_dirty.swap(false, Ordering::Relaxed) {
             Some(self.audio_bitrate())
@@ -87,6 +90,7 @@ impl RuntimeSettings {
         }
     }
 
+    #[allow(dead_code)]
     pub fn audio_bitrate_dirty(&self) -> bool {
         self.audio_bitrate_dirty.load(Ordering::Relaxed)
     }

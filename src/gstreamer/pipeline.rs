@@ -1,7 +1,7 @@
-//! GStreamer video capture and encoding pipeline
+//! GStreamer video encoding pipeline
 //!
 //! Provides a complete pipeline for:
-//! - X11 screen capture via ximagesrc
+//! - Receiving raw frames from compositor via appsrc
 //! - Video encoding (H.264, VP8, VP9)
 
 #![allow(dead_code)]
@@ -35,11 +35,9 @@ pub enum PipelineState {
 /// Pipeline configuration
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
-    /// X11 display string (e.g., ":0")
-    pub display: String,
-    /// Capture width (0 for auto-detect)
+    /// Frame width
     pub width: u32,
-    /// Capture height (0 for auto-detect)
+    /// Frame height
     pub height: u32,
     /// Target framerate
     pub framerate: u32,
@@ -53,23 +51,19 @@ pub struct PipelineConfig {
     pub keyframe_interval: u32,
     /// Pipeline latency in ms
     pub latency_ms: u32,
-    /// Show cursor in capture
-    pub show_cursor: bool,
 }
 
 impl From<&WebRTCConfig> for PipelineConfig {
     fn from(config: &WebRTCConfig) -> Self {
         Self {
-            display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
-            width: 0,
-            height: 0,
+            width: 1920,
+            height: 1080,
             framerate: 30,
             codec: config.video_codec,
             bitrate: config.video_bitrate,
             hardware_encoder: config.hardware_encoder,
             keyframe_interval: config.keyframe_interval,
             latency_ms: config.pipeline_latency_ms,
-            show_cursor: false,
         }
     }
 }
@@ -77,16 +71,14 @@ impl From<&WebRTCConfig> for PipelineConfig {
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
-            display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
-            width: 0,
-            height: 0,
+            width: 1920,
+            height: 1080,
             framerate: 30,
             codec: VideoCodec::H264,
             bitrate: 4000,
             hardware_encoder: HardwareEncoder::Auto,
             keyframe_interval: 60,
             latency_ms: 50,
-            show_cursor: false,
         }
     }
 }
@@ -94,56 +86,53 @@ impl Default for PipelineConfig {
 /// RTP packet callback type
 pub type RtpCallback = Box<dyn Fn(&[u8], u32, u64) + Send + Sync>;
 
-/// Video pipeline for GStreamer-based capture and encoding
+/// Video pipeline for GStreamer-based encoding
 pub struct VideoPipeline {
     pipeline: gst::Pipeline,
+    appsrc: gst_app::AppSrc,
     appsink: gst_app::AppSink,
     config: PipelineConfig,
-    state: Arc<AtomicBool>,  // true = running
+    state: Arc<AtomicBool>,
     frame_count: Arc<AtomicU64>,
     encoder_element: String,
 }
 
 impl VideoPipeline {
-    /// Create a new video pipeline
+    /// Create a new video pipeline with appsrc for compositor frame input
     pub fn new(config: PipelineConfig) -> Result<Self, GstError> {
-        // Ensure GStreamer is initialized
         gst::init().map_err(|e| GstError::InitFailed(e.to_string()))?;
 
         let pipeline = gst::Pipeline::new();
 
-        // Create source element (ximagesrc for X11)
-        let src = gst::ElementFactory::make("ximagesrc")
-            .property_from_str("display-name", &config.display)
-            .property("show-pointer", config.show_cursor)
-            .property("use-damage", true)   // Use XDamage for incremental capture (lower CPU)
-            .property("remote", true)       // Remote display mode (reduce XShm sync overhead)
-            .property("blocksize", 16384u32) // Larger buffer for high-res capture
-            .build()
-            .map_err(|e| GstError::PipelineFailed(format!("Failed to create ximagesrc: {}", e)))?;
+        // Create appsrc for receiving raw frames from compositor
+        let caps_str = format!(
+            "video/x-raw,format=BGRx,width={},height={},framerate={}/1",
+            config.width, config.height, config.framerate
+        );
+        let caps = caps_str.parse::<gst::Caps>()
+            .map_err(|e| GstError::PipelineFailed(format!("Invalid caps: {}", e)))?;
 
-        // Create videoconvert for format conversion (BGRx -> I420)
+        let appsrc = gst_app::AppSrc::builder()
+            .name("framesrc")
+            .caps(&caps)
+            .format(gst::Format::Time)
+            .is_live(true)
+            .do_timestamp(true)
+            .build();
+
+        // videoconvert: BGRx -> I420 for encoder
         let convert = gst::ElementFactory::make("videoconvert")
             .build()
             .map_err(|e| GstError::PipelineFailed(format!("Failed to create videoconvert: {}", e)))?;
 
-        // Select and create encoder
-        let encoder_selection = EncoderSelection::select(
-            config.codec,
-            config.hardware_encoder,
-        );
-
+        let encoder_selection = EncoderSelection::select(config.codec, config.hardware_encoder);
         let (encoder, encoder_name) = encoder_selection.create_encoder(
-            config.bitrate,
-            config.keyframe_interval,
+            config.bitrate, config.keyframe_interval,
         )?;
-
         info!("Using encoder: {} for codec {:?}", encoder_name, config.codec);
 
-        // Create RTP payloader based on codec
         let payloader = Self::create_payloader(config.codec)?;
 
-        // Create appsink for RTP packet output
         let appsink = gst_app::AppSink::builder()
             .name("rtpsink")
             .sync(false)
@@ -151,44 +140,29 @@ impl VideoPipeline {
             .drop(false)
             .build();
 
-        // Add elements to pipeline
         pipeline.add_many([
-            &src,
+            appsrc.upcast_ref(),
             &convert,
             &encoder,
             &payloader,
             appsink.upcast_ref(),
         ]).map_err(|e| GstError::PipelineFailed(format!("Failed to add elements: {}", e)))?;
 
-        // Caps to limit framerate at source level (prevents ximagesrc from capturing excess frames)
-        let src_caps_str = format!("video/x-raw,framerate={}/1", config.framerate);
-        let src_caps = src_caps_str.parse::<gst::Caps>()
-            .map_err(|e| GstError::PipelineFailed(format!("Invalid src caps: {}", e)))?;
-
-        let enc_caps_str = if config.width > 0 && config.height > 0 {
-            format!("video/x-raw,framerate={}/1,width={},height={}",
-                config.framerate, config.width, config.height)
-        } else {
-            format!("video/x-raw,framerate={}/1", config.framerate)
-        };
-        let enc_caps = enc_caps_str.parse::<gst::Caps>()
-            .map_err(|e| GstError::PipelineFailed(format!("Invalid enc caps: {}", e)))?;
-
-        // Link: src -[fps cap]-> convert -[fps+size cap]-> encoder -> payloader -> appsink
-        src.link_filtered(&convert, &src_caps)
-            .map_err(|e| GstError::LinkFailed(format!("src->convert: {}", e)))?;
-        convert.link_filtered(&encoder, &enc_caps)
+        // Link: appsrc -> convert -> encoder -> payloader -> appsink
+        appsrc.upcast_ref::<gst::Element>().link(&convert)
+            .map_err(|e| GstError::LinkFailed(format!("appsrc->convert: {}", e)))?;
+        convert.link(&encoder)
             .map_err(|e| GstError::LinkFailed(format!("convert->encoder: {}", e)))?;
         encoder.link(&payloader)
             .map_err(|e| GstError::LinkFailed(format!("encoder->payloader: {}", e)))?;
         payloader.link(appsink.upcast_ref::<gst::Element>())
             .map_err(|e| GstError::LinkFailed(format!("payloader->appsink: {}", e)))?;
 
-        // Set pipeline latency
         pipeline.set_latency(gst::ClockTime::from_mseconds(config.latency_ms as u64));
 
         Ok(Self {
             pipeline,
+            appsrc,
             appsink,
             config,
             state: Arc::new(AtomicBool::new(false)),
@@ -241,6 +215,22 @@ impl VideoPipeline {
             .set_state(gst::State::Null)
             .map_err(|e| GstError::StateChangeFailed(format!("Failed to stop pipeline: {}", e)))?;
 
+        Ok(())
+    }
+
+    /// Push a raw frame (XRGB8888 / BGRx) into the pipeline via appsrc
+    pub fn push_frame(&self, data: &[u8]) -> Result<(), GstError> {
+        let mut buffer = gst::Buffer::with_size(data.len())
+            .map_err(|e| GstError::PipelineFailed(format!("Buffer alloc failed: {}", e)))?;
+        {
+            let buffer_ref = buffer.get_mut().unwrap();
+            let mut map = buffer_ref.map_writable()
+                .map_err(|e| GstError::PipelineFailed(format!("Buffer map failed: {}", e)))?;
+            map.copy_from_slice(data);
+        }
+        self.appsrc.push_buffer(buffer)
+            .map_err(|e| GstError::PipelineFailed(format!("appsrc push failed: {:?}", e)))?;
+        self.frame_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 

@@ -1,4 +1,4 @@
-//! Configuration management for selkies-core
+//! Configuration management for ivnc
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -118,9 +118,6 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DisplayConfig {
-    /// X11 display number (e.g., ":0")
-    pub display: String,
-
     /// Screen width in pixels
     pub width: u32,
 
@@ -129,33 +126,6 @@ pub struct DisplayConfig {
 
     /// Refresh rate in Hz
     pub refresh_rate: u32,
-
-    /// Xinerama/RANDR enable
-    pub multi_monitor: bool,
-
-    /// Enable automatic X11 display management
-    #[serde(default = "default_auto_x11")]
-    pub auto_x11: bool,
-
-    /// X11 backend selection: "auto", "xvfb", "xdummy", or "none"
-    #[serde(default = "default_x11_backend")]
-    pub x11_backend: String,
-
-    /// Display number range for auto-allocation [start, end]
-    #[serde(default = "default_x11_display_range")]
-    pub x11_display_range: [u32; 2],
-
-    /// X11 startup timeout in seconds
-    #[serde(default = "default_x11_startup_timeout")]
-    pub x11_startup_timeout: u64,
-
-    /// Extra arguments to pass to Xvfb
-    #[serde(default)]
-    pub x11_extra_args: Vec<String>,
-
-    /// Window manager to launch after X11 starts (e.g., "openbox", "fluxbox", "" to disable)
-    #[serde(default = "default_window_manager")]
-    pub window_manager: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -393,9 +363,9 @@ impl Default for WebRTCConfig {
             turn_username: String::new(),
             turn_password: String::new(),
             video_codec: VideoCodec::H264,
-            video_bitrate: 4000,       // 4 Mbps default
-            video_bitrate_max: 8000,   // 8 Mbps max
-            video_bitrate_min: 500,    // 500 kbps min
+            video_bitrate: 8000,       // 8 Mbps default (screen content needs higher bitrate)
+            video_bitrate_max: 16000,  // 16 Mbps max
+            video_bitrate_min: 1000,   // 1 Mbps min
             hardware_encoder: HardwareEncoder::Auto,
             adaptive_bitrate: true,
             congestion_control: "goog-remb".to_string(),
@@ -430,22 +400,14 @@ impl Default for Config {
         Self {
             server: ServerConfig {
                 foreground: false,
-                pidfile: PathBuf::from("/var/run/selkies-core.pid"),
+                pidfile: PathBuf::from("/var/run/ivnc.pid"),
                 user: None,
                 group: None,
             },
             display: DisplayConfig {
-                display: ":0".to_string(),
                 width: 1920,
                 height: 1080,
                 refresh_rate: 60,
-                multi_monitor: false,
-                auto_x11: true,
-                x11_backend: "auto".to_string(),
-                x11_display_range: [99, 199],
-                x11_startup_timeout: 10,
-                x11_extra_args: Vec::new(),
-                window_manager: "openbox".to_string(),
             },
             http: HttpConfig {
                 host: "0.0.0.0".to_string(),
@@ -620,25 +582,4 @@ fn default_ice_trickle() -> bool {
 
 fn default_turn_protocol() -> String {
     "udp".to_string()
-}
-
-// Default value functions for DisplayConfig
-fn default_auto_x11() -> bool {
-    true
-}
-
-fn default_x11_backend() -> String {
-    "auto".to_string()
-}
-
-fn default_x11_display_range() -> [u32; 2] {
-    [99, 199]
-}
-
-fn default_x11_startup_timeout() -> u64 {
-    10
-}
-
-fn default_window_manager() -> String {
-    "openbox".to_string()
 }

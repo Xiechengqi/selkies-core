@@ -2,7 +2,7 @@
 
 # Default target
 help:
-	@echo "Selkies Core - Makefile"
+	@echo "iVnc - Makefile"
 	@echo ""
 	@echo "Available targets:"
 	@echo "  make build           - Build in debug mode (WebRTC)"
@@ -52,5 +52,5 @@ clean:
 
 # Install
 install: build-release
-	sudo cp target/release/selkies-core /usr/local/bin/
-	@echo "Installed to /usr/local/bin/selkies-core"
+	sudo cp target/release/ivnc /usr/local/bin/
+	@echo "Installed to /usr/local/bin/ivnc"

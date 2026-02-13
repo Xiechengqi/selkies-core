@@ -1,4 +1,4 @@
-//! Transport layer for Selkies streaming
+//! Transport layer for iVnc streaming
 //!
 //! Handles WebRTC signaling over WebSocket.
 

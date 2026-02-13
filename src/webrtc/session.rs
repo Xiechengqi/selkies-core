@@ -27,6 +27,7 @@ use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirecti
 use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
+use webrtc::track::track_local::TrackLocalWriter;
 use webrtc::data_channel::RTCDataChannel;
 
 /// Session state
@@ -70,6 +71,8 @@ pub struct WebRTCSession {
     pub video_track: Arc<TrackLocalStaticRTP>,
     /// Video track writer
     pub video_writer: Arc<VideoTrackWriter>,
+    /// Audio track for streaming (None if audio disabled)
+    pub audio_track: Option<Arc<TrackLocalStaticRTP>>,
     /// Input data channel (created after connection)
     pub input_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
     /// Current session state
@@ -93,6 +96,7 @@ impl WebRTCSession {
         peer_connection: Arc<RTCPeerConnection>,
         video_track: Arc<TrackLocalStaticRTP>,
         video_codec: VideoCodec,
+        audio_track: Option<Arc<TrackLocalStaticRTP>>,
     ) -> Self {
         let video_writer = Arc::new(VideoTrackWriter::new(video_track.clone(), video_codec));
 
@@ -101,6 +105,7 @@ impl WebRTCSession {
             peer_connection,
             video_track,
             video_writer,
+            audio_track,
             input_channel: Arc::new(RwLock::new(None)),
             state: Arc::new(RwLock::new(SessionState::New)),
             created_at: Instant::now(),
@@ -160,7 +165,7 @@ impl WebRTCSession {
     pub async fn send_to_client(&self, message: &str) -> Result<(), WebRTCError> {
         let channel = self.input_channel.read().await;
         if let Some(ref ch) = *channel {
-            ch.send(&bytes::Bytes::copy_from_slice(message.as_bytes())).await
+            ch.send_text(message.to_string()).await
                 .map_err(|e| WebRTCError::DataChannelError(format!("Send failed: {}", e)))?;
             Ok(())
         } else {
@@ -252,7 +257,7 @@ impl SessionManager {
         // Create video track
         let video_track = self.pc_manager.create_video_track(self.config.video_codec)?;
 
-        // Add track to peer connection (sendonly)
+        // Add video track to peer connection (sendonly)
         let transceiver_init = RTCRtpTransceiverInit {
             direction: RTCRtpTransceiverDirection::Sendonly,
             send_encodings: Vec::new(),
@@ -260,12 +265,28 @@ impl SessionManager {
         peer_connection.add_transceiver_from_track(video_track.clone(), Some(transceiver_init)).await
             .map_err(|e| WebRTCError::MediaError(format!("Failed to add video transceiver: {}", e)))?;
 
+        // Create and add audio track if audio is enabled
+        let audio_track = if self.shared_state.config.audio.enabled {
+            let track = self.pc_manager.create_audio_track()?;
+            let audio_init = RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Sendonly,
+                send_encodings: Vec::new(),
+            };
+            peer_connection.add_transceiver_from_track(track.clone(), Some(audio_init)).await
+                .map_err(|e| WebRTCError::MediaError(format!("Failed to add audio transceiver: {}", e)))?;
+            info!("Audio track added to session {}", session_id);
+            Some(track)
+        } else {
+            None
+        };
+
         // Create session
         let session = Arc::new(WebRTCSession::new(
             session_id.clone(),
             peer_connection.clone(),
             video_track,
             self.config.video_codec,
+            audio_track,
         ).await);
 
         // Set up callbacks
@@ -328,9 +349,135 @@ impl SessionManager {
                                     let _ = session.write_rtp(pkt).await;
                                 }
                             }
-                            // Also request a fresh keyframe
+                            // Request a fresh keyframe
                             rt.request_keyframe();
                             info!("Keyframe request sent for session {}", sid);
+
+                            // Start text forwarding loop: read from text broadcast, write to data channel
+                            let text_session = session.clone();
+                            let text_ss = ss.clone();
+                            let text_sid = sid.clone();
+                            tokio::spawn(async move {
+                                let mut text_rx = text_ss.subscribe_text();
+                                info!("Session {} text forward loop started", text_sid);
+                                loop {
+                                    match text_rx.recv().await {
+                                        Ok(msg) => {
+                                            let state = text_session.get_state().await;
+                                            if state != SessionState::Connected {
+                                                info!("Session {} text forward stopping", text_sid);
+                                                break;
+                                            }
+                                            let _ = text_session.send_to_client(&msg).await;
+                                        }
+                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                            warn!("Session {} text receiver lagged by {}", text_sid, n);
+                                        }
+                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                            break;
+                                        }
+                                    }
+                                }
+                            });
+
+                            // Start audio forwarding loop if audio track exists
+                            if let Some(audio_track) = session.audio_track.clone() {
+                                let audio_ss = ss.clone();
+                                let audio_sid = sid.clone();
+                                let audio_session = session.clone();
+                                tokio::spawn(async move {
+                                    let mut audio_rx = audio_ss.subscribe_audio();
+                                    let mut seq: u16 = 0;
+                                    let mut timestamp: u32 = 0;
+                                    // Derive SSRC from session ID bytes
+                                    let ssrc: u32 = {
+                                        let bytes = audio_sid.as_bytes();
+                                        let mut h: u32 = 0x811c9dc5;
+                                        for &b in bytes { h = h.wrapping_mul(0x01000193) ^ b as u32; }
+                                        h
+                                    };
+                                    let mut fwd_count: u64 = 0;
+                                    // Opus uses 48kHz clock; 20ms frames = 960 samples
+                                    let samples_per_frame: u32 = 960;
+                                    info!("Session {} audio forward loop started", audio_sid);
+                                    loop {
+                                        match audio_rx.recv().await {
+                                            Ok(pkt) => {
+                                                let state = audio_session.get_state().await;
+                                                if state != SessionState::Connected {
+                                                    info!("Session {} audio forward stopping", audio_sid);
+                                                    break;
+                                                }
+                                                // Build RTP packet for Opus frame
+                                                let rtp = webrtc::rtp::packet::Packet {
+                                                    header: webrtc::rtp::header::Header {
+                                                        version: 2,
+                                                        padding: false,
+                                                        extension: false,
+                                                        marker: true,
+                                                        payload_type: 111,
+                                                        sequence_number: seq,
+                                                        timestamp,
+                                                        ssrc,
+                                                        ..Default::default()
+                                                    },
+                                                    payload: bytes::Bytes::from(pkt.data),
+                                                };
+                                                seq = seq.wrapping_add(1);
+                                                timestamp = timestamp.wrapping_add(samples_per_frame);
+
+                                                fwd_count += 1;
+                                                if fwd_count <= 5 || fwd_count % 2000 == 0 {
+                                                    info!("Session {} audio RTP #{}: {} bytes",
+                                                        audio_sid, fwd_count, rtp.payload.len());
+                                                }
+                                                if let Err(e) = audio_track.write_rtp(&rtp).await {
+                                                    let _ = e; // suppress unused warning
+                                                    debug!("Session {} audio write error: {}", audio_sid, e);
+                                                }
+                                            }
+                                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                                warn!("Session {} audio receiver lagged by {}", audio_sid, n);
+                                            }
+                                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                                info!("Session {} audio channel closed", audio_sid);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+
+                            // Start RTP forwarding loop: read from broadcast channel, write to track
+                            let mut rtp_rx = ss.subscribe_rtp();
+                            let mut fwd_count: u64 = 0;
+                            info!("Session {} RTP forward loop started", sid);
+                            loop {
+                                match rtp_rx.recv().await {
+                                    Ok(pkt) => {
+                                        let state = session.get_state().await;
+                                        if state != SessionState::Connected {
+                                            info!("Session {} no longer connected, stopping RTP forward", sid);
+                                            break;
+                                        }
+                                        fwd_count += 1;
+                                        if fwd_count <= 5 || fwd_count % 500 == 0 {
+                                            info!("Session {} fwd RTP #{}: {} bytes", sid, fwd_count, pkt.len());
+                                        }
+                                        if let Err(e) = session.write_rtp(&pkt).await {
+                                            warn!("Session {} RTP write error (fwd #{}): {}", sid, fwd_count, e);
+                                            break;
+                                        }
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                        warn!("Session {} RTP receiver lagged by {} packets", sid, n);
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                        info!("Session {} RTP channel closed", sid);
+                                        break;
+                                    }
+                                }
+                            }
                         });
                     }
                 } else if state == RTCPeerConnectionState::Failed || state == RTCPeerConnectionState::Closed {

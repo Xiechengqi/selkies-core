@@ -1,6 +1,6 @@
 # Build artifacts
 target/
-selkies-core-linux-amd64
+ivnc-linux-amd64
 
 # IDE
 .idea/
@@ -10,7 +10,7 @@ selkies-core-linux-amd64
 
 # Local configuration
 config/*.toml
-!config/selkies-core.example.toml
+!config/ivnc.example.toml
 
 # Runtime files
 *.pid
@@ -27,3 +27,6 @@ Thumbs.db
 
 # Testing
 coverage/
+
+# Working files
+.plan.md

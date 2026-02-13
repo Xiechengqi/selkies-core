@@ -1,16 +1,20 @@
 [package]
-name = "selkies-core"
+name = "ivnc"
 version = "0.2.0"
 edition = "2021"
-description = "Rust-based Selkies streaming core - WebRTC + GStreamer, X11"
-authors = ["Selkies Team"]
+description = "iVnc - WebRTC + GStreamer + Wayland compositor streaming core"
+authors = ["iVnc Team"]
 
 [dependencies]
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
 
-# X11 bindings
-x11rb = { version = "0.13", features = ["allow-unsafe-code", "xtest", "xfixes", "shm"] }
+# Wayland compositor
+smithay = { path = "../smithay", default-features = false, features = ["wayland_frontend", "desktop", "renderer_pixman"] }
+calloop = "0.14.0"
+xkbcommon = { version = "0.9.0", features = ["wayland"] }
+bitflags = "2"
+pixman = "0.2"
 
 # Image encoding (cursor PNG)
 image = { version = "0.24", default-features = false, features = ["png"] }
@@ -75,7 +79,7 @@ libc = "0.2"
 webrtc = "0.11"
 webrtc-util = "0.9"
 webrtc-ice = "0.11"
-webrtc-dtls = "0.9"
+webrtc-dtls = "0.10"
 webrtc-srtp = "0.13"
 webrtc-media = "0.8"
 webrtc-sctp = "0.10"
@@ -98,7 +102,7 @@ sha1 = "0.10"
 cc = "1.0"
 
 [features]
-default = []
+default = ["pulseaudio"]
 audio = ["cpal", "opus"]
 pulseaudio = ["opus", "libpulse-simple-binding", "libpulse-binding"]
 
@@ -116,3 +120,10 @@ panic = "abort"
 
 [dev-dependencies]
 criterion = "0.5"
+
+[patch.crates-io]
+# Fix: Chrome sends X25519Kyber768 as preferred curve in DTLS ClientHello.
+# Upstream blindly picks the first curve, causing handshake failure.
+# Patch selects the first *supported* curve (P256/P384/X25519) instead.
+# See patches/webrtc-dtls-0.10.0/src/flight/flight0.rs
+webrtc-dtls = { path = "patches/webrtc-dtls-0.10.0" }

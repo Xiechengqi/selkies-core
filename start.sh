@@ -1,10 +1,10 @@
 #!/bin/bash
-# Quick start script for Selkies Core
+# Quick start script for iVnc
 
 set -e
 
 echo "==================================="
-echo "Selkies Core - Quick Start"
+echo "iVnc - Quick Start"
 echo "==================================="
 echo ""
 
@@ -16,19 +16,19 @@ if [ ! -f "config.toml" ]; then
 fi
 
 # Check if binary exists
-if [ ! -f "target/release/selkies-core" ]; then
+if [ ! -f "target/release/ivnc" ]; then
     echo ""
     echo "Binary not found. Building..."
     ./build.sh --release
 fi
 
 echo ""
-echo "Starting Selkies Core..."
+echo "Starting iVnc..."
 echo ""
 
 # Set environment
 export DISPLAY=${DISPLAY:-:0}
-export SELKIES_LOG=${SELKIES_LOG:-info}
+export IVNC_LOG=${IVNC_LOG:-info}
 
 # Run
-./target/release/selkies-core --config config.toml
+./target/release/ivnc --config config.toml

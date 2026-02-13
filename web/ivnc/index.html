@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<body>
+  <div id="app"></div>
+  <script>
+    (function() {
+      window.__IVNC_WS_HOST__ = window.location.hostname;
+      // Server replaces __IVNC_INJECTED_PORT__ with actual port (e.g., "8007")
+      // The variable name __IVNC_WS_PORT__ is preserved
+      const injectedPort = "__IVNC_INJECTED_PORT__";
+      if (injectedPort !== "__IVNC_INJECTED_PORT__") {
+        window.__IVNC_WS_PORT__ = injectedPort;
+      } else {
+        window.__IVNC_WS_PORT__ = "8007";
+      }
+      fetch(`/ws-config?ts=${Date.now()}`, { cache: 'no-store' })
+        .then((resp) => resp.ok ? resp.json() : null)
+        .then((data) => {
+          if (data && data.ws_port) {
+            window.__IVNC_WS_PORT__ = String(data.ws_port);
+            console.log('iVnc WS port set from ws-config', window.__IVNC_WS_PORT__);
+          }
+        })
+        .catch((err) => {
+          console.warn('iVnc ws-config fetch failed', err);
+        })
+        .finally(() => {
+          const script = document.createElement('script');
+          script.type = 'module';
+          script.src = 'ivnc-core.js?v=46';
+          document.head.appendChild(script);
+        });
+    })();
+  </script>
+</body>
+</html>

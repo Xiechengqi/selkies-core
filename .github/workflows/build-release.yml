@@ -12,7 +12,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      SELKIES_DISABLE_DATA_CHANNEL: "1"
+      IVNC_DISABLE_DATA_CHANNEL: "1"
     strategy:
       matrix:
         include:
@@ -27,20 +27,27 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Checkout smithay
+        uses: actions/checkout@v4
+        with:
+          repository: Smithay/smithay
+          ref: 3d3f9e359352d95cffd1e53287d57df427fcbd34
+          path: ../smithay
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: web/selkies/package-lock.json
+          cache-dependency-path: web/ivnc/package-lock.json
 
       - name: Build frontend
         run: |
-          cd web/selkies
+          cd web/ivnc
           npm ci
           npm run build
           mkdir -p dist
-          for f in selkies-core.js selkies-wr-core.js selkies-ws-core.js; do
+          for f in ivnc-core.js ivnc-wr-core.js; do
             if [ -f "$f" ]; then
               cp -f "$f" dist/
             fi
@@ -73,7 +80,13 @@ jobs:
             libxkbcommon-dev \
             libssl-dev \
             libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev
+            libgstreamer-plugins-base1.0-dev \
+            libpulse-dev \
+            libwayland-dev \
+            libpixman-1-dev \
+            libinput-dev \
+            libudev-dev \
+            libseat-dev
 
           # Install Rust
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -84,7 +97,7 @@ jobs:
           cargo build --release --locked
 
           # Copy binary to output
-          cp target/release/selkies-core /output/selkies-core-linux-$ARCH
+          cp target/release/ivnc /output/ivnc-linux-$ARCH
           BUILDSCRIPT
 
           chmod +x build.sh
@@ -96,6 +109,7 @@ jobs:
           docker run --rm \
             --platform ${{ matrix.docker_platform }} \
             -v $(pwd):/workspace \
+            -v $(pwd)/../smithay:/smithay \
             -v $(pwd)/output:/output \
             -v $(pwd)/build.sh:/build.sh \
             -e ARCH=${{ matrix.arch }} \
@@ -105,13 +119,13 @@ jobs:
       - name: Verify binary
         run: |
           ls -lh output/
-          file output/selkies-core-linux-${{ matrix.arch }} || true
+          file output/ivnc-linux-${{ matrix.arch }} || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: selkies-core-${{ matrix.arch }}
-          path: output/selkies-core-linux-${{ matrix.arch }}
+          name: ivnc-${{ matrix.arch }}
+          path: output/ivnc-linux-${{ matrix.arch }}
 
   release:
     needs: [build]
@@ -130,8 +144,8 @@ jobs:
           mkdir -p release-files
 
           # WebRTC + GStreamer
-          cp artifacts/selkies-core-amd64/selkies-core-linux-amd64 release-files/ || true
-          # cp artifacts/selkies-core-arm64/selkies-core-linux-arm64 release-files/ || true
+          cp artifacts/ivnc-amd64/ivnc-linux-amd64 release-files/ || true
+          # cp artifacts/ivnc-arm64/ivnc-linux-arm64 release-files/ || true
 
           # Make executable
           chmod +x release-files/* || true
@@ -187,7 +201,7 @@ jobs:
 
             | 架构 | 文件名 |
             |------|--------|
-            | AMD64 | `selkies-core-linux-amd64` |
+            | AMD64 | `ivnc-linux-amd64` |
 
             ---
 
@@ -195,8 +209,8 @@ jobs:
 
             ```bash
             # AMD64 完整版
-            wget https://github.com/${{ github.repository }}/releases/download/latest/selkies-core-linux-amd64 -O selkies-core
-            chmod +x selkies-core
+            wget https://github.com/${{ github.repository }}/releases/download/latest/ivnc-linux-amd64 -O ivnc
+            chmod +x ivnc
             ```
 
             ### 运行时依赖

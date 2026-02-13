@@ -38,10 +38,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy binary
-COPY --from=builder /build/target/release/selkies-core /usr/local/bin/
+COPY --from=builder /build/target/release/ivnc /usr/local/bin/
 
 # Copy config
-COPY config.example.toml /etc/selkies-core.toml
+COPY config.example.toml /etc/ivnc.toml
 
 # Expose ports
 EXPOSE 8000 8080
@@ -51,4 +51,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Run
-CMD ["selkies-core", "--config", "/etc/selkies-core.toml"]
+CMD ["ivnc", "--config", "/etc/ivnc.toml"]

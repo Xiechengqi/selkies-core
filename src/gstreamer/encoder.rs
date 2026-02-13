@@ -168,11 +168,36 @@ impl EncoderSelection {
 
             // OpenH264
             "openh264enc" => {
-                gst::ElementFactory::make("openh264enc")
+                let elem = gst::ElementFactory::make("openh264enc")
                     .name("encoder")
                     .property("bitrate", bitrate_kbps * 1000)  // bps
                     .property("gop-size", keyframe_interval)
-                    .build()
+                    .build();
+                // Try setting optional screen-content properties (may not exist on older versions)
+                if let Ok(ref e) = elem {
+                    let try_set = |name: &str, val: &str| {
+                        if e.find_property(name).is_some() {
+                            e.set_property_from_str(name, val);
+                        } else {
+                            debug!("openh264enc: property '{}' not available, skipping", name);
+                        }
+                    };
+                    let try_set_bool = |name: &str, val: bool| {
+                        if e.find_property(name).is_some() {
+                            e.set_property(name, val);
+                        } else {
+                            debug!("openh264enc: property '{}' not available, skipping", name);
+                        }
+                    };
+                    try_set("usage-type", "screen");
+                    try_set("complexity", "high");
+                    try_set("rate-control", "bitrate");
+                    try_set_bool("adaptive-quantization", true);
+                    try_set_bool("background-detection", true);
+                    try_set_bool("scene-change-detection", true);
+                    try_set("slice-mode", "auto");
+                }
+                elem
             }
 
             // VP8 software

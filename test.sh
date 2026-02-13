@@ -1,10 +1,10 @@
 #!/bin/bash
-# Selkies Core Test Script
+# iVnc Test Script
 
 set -e
 
 echo "==================================="
-echo "Selkies Core Test Script"
+echo "iVnc Test Script"
 echo "==================================="
 echo ""
 

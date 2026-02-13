@@ -67,6 +67,12 @@ impl InputDataChannel {
             let shared_state = shared_state.clone();
 
             Box::pin(async move {
+                static MSG_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let mc = MSG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if mc < 10 || mc % 500 == 0 {
+                    let preview = String::from_utf8_lossy(&msg.data[..msg.data.len().min(60)]);
+                    debug!("DC msg #{} (str={}): {}", mc, msg.is_string, preview);
+                }
                 if msg.is_string {
                     let text = match std::str::from_utf8(&msg.data) {
                         Ok(text) => text,
@@ -93,6 +99,10 @@ impl InputDataChannel {
                         return;
                     }
                     if text == "kr" {
+                        let _ = input_tx.send(InputEventData {
+                            event_type: InputEvent::KeyboardReset,
+                            ..Default::default()
+                        });
                         return;
                     }
                     if text.starts_with("s,") {
@@ -143,8 +153,37 @@ impl InputDataChannel {
                         shared_state.update_webrtc_stats("audio", payload);
                         return;
                     }
+                    if text.starts_with("focus,") {
+                        let payload = text.trim_start_matches("focus,");
+                        if let Ok(window_id) = payload.parse::<u32>() {
+                            let mut event = InputEventData::default();
+                            event.event_type = InputEvent::WindowFocus;
+                            event.window_id = window_id;
+                            if let Err(e) = input_tx.send(event) {
+                                warn!("Failed to send WindowFocus event: {}", e);
+                            }
+                        }
+                        return;
+                    }
+                    if text.starts_with("close,") {
+                        let payload = text.trim_start_matches("close,");
+                        if let Ok(window_id) = payload.parse::<u32>() {
+                            let mut event = InputEventData::default();
+                            event.event_type = InputEvent::WindowClose;
+                            event.window_id = window_id;
+                            if let Err(e) = input_tx.send(event) {
+                                warn!("Failed to send WindowClose event: {}", e);
+                            }
+                        }
+                        return;
+                    }
                     match Self::parse_input_text(text) {
                         Ok(event) => {
+                            static INPUT_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                            let c = INPUT_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if c < 20 || c % 500 == 0 {
+                                debug!("DC input #{}: {:?} mask={}", c, event.event_type, event.button_mask);
+                            }
                             if let Err(e) = input_tx.send(event) {
                                 warn!("Failed to send input event: {}", e);
                             }
