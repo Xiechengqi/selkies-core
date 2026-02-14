@@ -168,8 +168,8 @@ fn run(
         }
         info!("gtk3-nocsd enabled via LD_PRELOAD");
     }
-    // Set up GTK CSS via environment variable to hide headerbars in fullscreen apps.
-    // This only affects child processes (Wayland clients), not the entire system.
+    // Set up GTK CSS to hide headerbars on fullscreen windows only.
+    // Dialogs are excluded so their controls (Open/Cancel buttons) stay visible.
     setup_gtk_css_env();
     info!("Wayland socket: {:?}", socket_name);
 
@@ -998,13 +998,12 @@ fn apply_cli_overrides(config: &mut Config, args: &Args) {
     }
 }
 
-/// Set up GTK CSS via environment variable to hide CSD headerbars in fullscreen apps.
-/// This only affects child processes spawned by ivnc, not the entire system.
-/// GTK3 and GTK4 both support GTK_CSS for loading additional CSS files.
+/// Set up GTK CSS to hide headerbars on fullscreen windows.
+/// Dialogs are excluded so their controls stay visible.
 fn setup_gtk_css_env() {
+    // Only hide headerbar on fullscreen windows, exclude dialogs
     let css = "\
-window.fullscreen:not(.dialog):not(.messagedialog) headerbar,\n\
-window.maximized:not(.dialog):not(.messagedialog) headerbar {\n\
+window.fullscreen:not(.dialog):not(.messagedialog) headerbar {\n\
   min-height: 0;\n\
   padding: 0;\n\
   margin: 0 0 -100px 0;\n\
@@ -1013,15 +1012,13 @@ window.maximized:not(.dialog):not(.messagedialog) headerbar {\n\
   box-shadow: none;\n\
   opacity: 0;\n\
 }\n\
-window.fullscreen:not(.dialog):not(.messagedialog) headerbar *,\n\
-window.maximized:not(.dialog):not(.messagedialog) headerbar * {\n\
+window.fullscreen:not(.dialog):not(.messagedialog) headerbar * {\n\
   min-height: 0;\n\
   min-width: 0;\n\
   padding: 0;\n\
   margin: 0;\n\
 }\n\
-window.fullscreen:not(.dialog):not(.messagedialog) .titlebar,\n\
-window.maximized:not(.dialog):not(.messagedialog) .titlebar {\n\
+window.fullscreen:not(.dialog):not(.messagedialog) .titlebar {\n\
   min-height: 0;\n\
   padding: 0;\n\
   margin: 0 0 -100px 0;\n\
@@ -1030,28 +1027,19 @@ window.maximized:not(.dialog):not(.messagedialog) .titlebar {\n\
   box-shadow: none;\n\
   opacity: 0;\n\
 }\n\
-window.fullscreen:not(.dialog):not(.messagedialog) .titlebar *,\n\
-window.maximized:not(.dialog):not(.messagedialog) .titlebar * {\n\
+window.fullscreen:not(.dialog):not(.messagedialog) .titlebar * {\n\
   min-height: 0;\n\
   min-width: 0;\n\
   padding: 0;\n\
   margin: 0;\n\
-}\n\
-window decoration {\n\
-  margin: 0;\n\
-  padding: 0;\n\
-  box-shadow: none;\n\
-  border: none;\n\
 }\n\
 /* Ensure dialog action areas stay visible */\n\
 .dialog actionbar,\n\
-.messagedialog actionbar,\n\
-.dialog .dialog-action-area,\n\
-.messagedialog .dialog-action-area {\n\
+.messagedialog actionbar {\n\
   min-height: 40px;\n\
 }\n";
 
-    // Write CSS to ivnc-specific directory, not user's GTK config
+    // Write CSS to ivnc-specific directory
     let runtime_dir = env::var("XDG_RUNTIME_DIR")
         .unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::getuid() }));
     let ivnc_dir = format!("{}/ivnc", runtime_dir);
@@ -1068,7 +1056,6 @@ window decoration {\n\
     info!("Wrote GTK CSS to {}", css_path);
 
     // GTK_CSS tells GTK to load this CSS file in addition to the theme's CSS.
-    // This only affects processes that inherit this environment variable.
     env::set_var("GTK_CSS", &css_path);
     info!("Set GTK_CSS={}", css_path);
 }

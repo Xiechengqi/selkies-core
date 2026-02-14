@@ -61,32 +61,19 @@ impl XdgShellHandler for Compositor {
 
         self.space.map_element(window, (0, 0), false);
 
-        if let Some(output_geo) = output_geo {
-            if is_dialog {
-                // Dialog: don't fullscreen, force a size that fits with CSD decorations
+        // Main window (not dialog): set fullscreen to fill the screen.
+        // Dialogs/popups: don't force any size - let the app decide.
+        if !is_dialog {
+            if let Some(output_geo) = output_geo {
                 surface.with_pending_state(|state| {
-                    let w = ((output_geo.size.w * 2) / 3).max(400);
-                    let h = ((output_geo.size.h * 2) / 3).max(300);
-                    state.size = Some((w, h).into());
-                });
-                surface.send_pending_configure();
-            } else {
-                // Normal toplevel: only set size here. Fullscreen state will be
-                // added later in commit handler once app_id is known (browsers
-                // should NOT get Fullscreen as they hide their address bar).
-                surface.with_pending_state(|state| {
+                    state.states.set(xdg_toplevel::State::Fullscreen);
                     state.size = Some((output_geo.size.w, output_geo.size.h).into());
                 });
                 surface.send_pending_configure();
             }
         }
 
-        // Register surface for stable taskbar ordering — skip dialogs
-        if !is_dialog {
-            self.window_registry.push(surface.wl_surface().clone());
-        }
-
-        // Remember which surfaces are dialogs (for commit handler centering/sizing)
+        // Remember which surfaces are dialogs (for commit handler centering)
         if is_dialog {
             self.dialog_surfaces.insert(surface.wl_surface().id().protocol_id());
         }
@@ -96,27 +83,19 @@ impl XdgShellHandler for Compositor {
         let focus_serial = smithay::utils::SERIAL_COUNTER.next_serial();
         keyboard.set_focus(self, Some(surface.wl_surface().clone()), focus_serial);
 
-        self.taskbar_dirty = true;
+        // Only update taskbar for the first (main) window, not dialogs/popups
+        if !is_dialog && self.window_registry.is_empty() {
+            self.window_registry.push(surface.wl_surface().clone());
+            self.taskbar_dirty = true;
+        }
     }
 
     fn parent_changed(&mut self, surface: ToplevelSurface) {
-        // When a toplevel gets a parent (becomes a dialog), undo fullscreen
-        // and force a smaller size so the dialog fits on screen with CSD decorations.
+        // When a toplevel gets a parent (becomes a dialog), just track it.
+        // Don't force any size - let the app decide.
         if surface.parent().is_some() {
-            let output_geo = self.space.outputs().next()
-                .and_then(|o| self.space.output_geometry(o));
-            log::info!("parent_changed: dialog detected, removing fullscreen");
+            log::info!("parent_changed: dialog detected");
             self.dialog_surfaces.insert(surface.wl_surface().id().protocol_id());
-            surface.with_pending_state(|state| {
-                state.states.unset(xdg_toplevel::State::Fullscreen);
-                state.states.unset(xdg_toplevel::State::Maximized);
-                if let Some(geo) = output_geo {
-                    let w = ((geo.size.w * 2) / 3).max(400);
-                    let h = ((geo.size.h * 2) / 3).max(300);
-                    state.size = Some((w, h).into());
-                }
-            });
-            surface.send_pending_configure();
         }
     }
 

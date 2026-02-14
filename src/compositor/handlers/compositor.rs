@@ -109,59 +109,9 @@ impl CompositorHandler for Compositor {
                         self.space.map_element(window, (x, y), true);
                     }
                 } else if !self.titlebar_adjusted.contains(&surface_id) {
-                    // Once app_id is known, set Fullscreen for non-browser apps.
-                    // Browsers (chromium, firefox, etc.) must NOT get Fullscreen
-                    // because they hide their address bar in fullscreen mode.
-                    // new_toplevel only sets size; Fullscreen is deferred to here.
-                    if !self.browser_unfullscreened.contains(&surface_id) {
-                        let app_id = smithay::wayland::compositor::with_states(surface, |states| {
-                            states.data_map
-                                .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
-                                .map(|d| d.lock().unwrap().app_id.clone().unwrap_or_default())
-                                .unwrap_or_default()
-                        });
-                        // Decide once app_id is known, OR once the surface has
-                        // real geometry (some apps like weston-terminal never set app_id).
-                        let has_geometry = geo.size.w > 0 && geo.size.h > 0;
-                        if !app_id.is_empty() || has_geometry {
-                            self.browser_unfullscreened.insert(surface_id);
-                            let is_browser = app_id.contains("chromium") || app_id.contains("firefox")
-                                || app_id.contains("google-chrome") || app_id.contains("brave");
-                            if !is_browser {
-                                let toplevel = window.toplevel().unwrap();
-                                toplevel.with_pending_state(|state| {
-                                    state.states.set(xdg_toplevel::State::Fullscreen);
-                                    state.size = Some((out_size.w, out_size.h).into());
-                                });
-                                toplevel.send_pending_configure();
-                                log::info!("Non-browser app (app_id={}), set Fullscreen for sid={}", app_id, surface_id);
-                            } else {
-                                log::info!("Browser detected (app_id={}), skipping Fullscreen for sid={}", app_id, surface_id);
-                            }
-                        }
-                    }
-                    // CSD compensation for non-dialog toplevels only
-                    let titlebar_h = if geo.loc.y > 0 {
-                        geo.loc.y
-                    } else if geo.size.h > 0 && geo.size.h < out_size.h {
-                        out_size.h - geo.size.h
-                    } else {
-                        0
-                    };
-
-                    if titlebar_h > 0 && self.csd_retry_count < 3 {
-                        self.csd_retry_count += 1;
-                        self.titlebar_adjusted.insert(surface_id);
-                        let toplevel = window.toplevel().unwrap();
-                        toplevel.with_pending_state(|state| {
-                            state.size = Some((out_size.w, out_size.h + titlebar_h).into());
-                        });
-                        toplevel.send_pending_configure();
-                        log::info!(
-                            "CSD compensate: surface {} geo={:?} bbox={:?} output={}x{} adding {}px",
-                            surface_id, geo, bbox, out_size.w, out_size.h, titlebar_h
-                        );
-                    }
+                    // No longer forcing fullscreen - windows keep their natural size and headerbars.
+                    // This allows dialogs and popups to display correctly with their controls visible.
+                    self.titlebar_adjusted.insert(surface_id);
                 }
             }
         }
