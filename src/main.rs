@@ -168,8 +168,9 @@ fn run(
         }
         info!("gtk3-nocsd enabled via LD_PRELOAD");
     }
-    // Write GTK CSS to clean up window decorations
-    hide_gtk_titlebars();
+    // Set up GTK CSS via environment variable to hide headerbars in fullscreen apps.
+    // This only affects child processes (Wayland clients), not the entire system.
+    setup_gtk_css_env();
     info!("Wayland socket: {:?}", socket_name);
 
     // GStreamer pipeline
@@ -997,9 +998,10 @@ fn apply_cli_overrides(config: &mut Config, args: &Args) {
     }
 }
 
-/// Write GTK3/GTK4 CSS to hide CSD headerbars for fullscreen/maximized windows.
-/// Dialog windows (including file choosers) are excluded to keep their controls visible.
-fn hide_gtk_titlebars() {
+/// Set up GTK CSS via environment variable to hide CSD headerbars in fullscreen apps.
+/// This only affects child processes spawned by ivnc, not the entire system.
+/// GTK3 and GTK4 both support GTK_CSS for loading additional CSS files.
+fn setup_gtk_css_env() {
     let css = "\
 window.fullscreen:not(.dialog):not(.messagedialog) headerbar,\n\
 window.maximized:not(.dialog):not(.messagedialog) headerbar {\n\
@@ -1049,19 +1051,24 @@ window decoration {\n\
   min-height: 40px;\n\
 }\n";
 
-    let home = env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-
-    // GTK3: ~/.config/gtk-3.0/gtk.css
-    let gtk3_dir = format!("{home}/.config/gtk-3.0");
-    let _ = std::fs::create_dir_all(&gtk3_dir);
-    if std::fs::write(format!("{gtk3_dir}/gtk.css"), css).is_ok() {
-        info!("Wrote GTK3 CSS to hide headerbar");
+    // Write CSS to ivnc-specific directory, not user's GTK config
+    let runtime_dir = env::var("XDG_RUNTIME_DIR")
+        .unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::getuid() }));
+    let ivnc_dir = format!("{}/ivnc", runtime_dir);
+    if std::fs::create_dir_all(&ivnc_dir).is_err() {
+        warn!("Failed to create ivnc runtime dir {}", ivnc_dir);
+        return;
     }
 
-    // GTK4: ~/.config/gtk-4.0/gtk.css
-    let gtk4_dir = format!("{home}/.config/gtk-4.0");
-    let _ = std::fs::create_dir_all(&gtk4_dir);
-    if std::fs::write(format!("{gtk4_dir}/gtk.css"), css).is_ok() {
-        info!("Wrote GTK4 CSS to hide headerbar");
+    let css_path = format!("{}/gtk-headerbar.css", ivnc_dir);
+    if std::fs::write(&css_path, css).is_err() {
+        warn!("Failed to write GTK CSS to {}", css_path);
+        return;
     }
+    info!("Wrote GTK CSS to {}", css_path);
+
+    // GTK_CSS tells GTK to load this CSS file in addition to the theme's CSS.
+    // This only affects processes that inherit this environment variable.
+    env::set_var("GTK_CSS", &css_path);
+    info!("Set GTK_CSS={}", css_path);
 }
