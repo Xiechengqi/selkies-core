@@ -25,7 +25,7 @@
  *   limitations under the License.
  */
 
-import { WebRTCDemo } from "./lib/webrtc.js?v=20";
+import { WebRTCDemo } from "./lib/webrtc.js?v=24";
 import { WebRTCDemoSignaling } from "./lib/signaling.js?v=1";
 import { stringToBase64 } from "./lib/util.js?v=1";
 import { Input } from "./lib/input2.js?v=18";
@@ -194,6 +194,18 @@ function InitUI() {
 		background: rgba(76, 134, 230, 0.2);
 		border-color: rgba(76, 134, 230, 0.4);
 	}
+	.taskbar-conn {
+		position: absolute;
+		right: 8px;
+		top: 0;
+		padding: 0 4px;
+		font-size: 11px;
+		line-height: 36px;
+		color: rgba(255, 255, 255, 0.7);
+		white-space: nowrap;
+		user-select: none;
+		pointer-events: none;
+	}
 	.taskbar-trigger {
 		position: fixed;
 		bottom: 0;
@@ -301,7 +313,7 @@ export default function webrtc() {
 	let rtime = null;
 	let rdelta = 500; // time in milliseconds
 	let rtimeout = false;
-	let manualWidth, manualHeight = 0;
+	let manualWidth = 0, manualHeight = 0;
 	window.isManualResolutionMode = false;
 	window.fps = 0;
 
@@ -317,6 +329,7 @@ export default function webrtc() {
 	// Set storage key based on URL
 	const urlForKey = window.location.href.split('#')[0];
 	const storageAppName = urlForKey.replace(/[^a-zA-Z0-9.-_]/g, '_');
+	const _urlParams = new URLSearchParams(window.location.search);
 
 	const getIntParam = (key, default_value) => {
 		const prefixedKey = `${storageAppName}_${key}`;
@@ -332,6 +345,9 @@ export default function webrtc() {
 		}
 	};
 	const getBoolParam = (key, default_value) => {
+		if (_urlParams.has(key)) {
+			return _urlParams.get(key).toLowerCase() === 'true';
+		}
 		const prefixedKey = `${storageAppName}_${key}`;
 		const v = window.localStorage.getItem(prefixedKey);
 		if (v === null) {
@@ -736,7 +752,7 @@ export default function webrtc() {
 				handleSettingsMessage(message.settings);
 				break;
 			case "command":
-				if (message.value !== null || message.value !== undefined) {
+				if (message.value !== null && message.value !== undefined) {
 					const commandString = message.value;
 					console.log(`Received 'command' message with value: "${commandString}"`);
 					webrtc.sendDataChannelMessage(`cmd,${commandString}`);
@@ -1039,6 +1055,26 @@ export default function webrtc() {
 				connectionStat.connectionPacketsReceived = stats.general.packetsReceived;
 				connectionStat.connectionPacketsLost = stats.general.packetsLost;
 				connectionStat.connectionStatType = stats.general.connectionType
+
+				var connEl = document.getElementById('conn-indicator');
+				if (connEl) {
+					var ct = stats.general.connectionType;
+					if (ct === 'relay') {
+						connEl.textContent = 'TURN';
+						connEl.style.color = '#f0a020';
+					} else if (ct === 'host') {
+						connEl.textContent = 'TCP';
+						connEl.style.color = '#4caf50';
+					} else if (ct && ct !== 'NA' && ct !== 'unknown') {
+						connEl.textContent = ct.toUpperCase();
+						connEl.style.color = '#4caf50';
+					} else {
+						connEl.textContent = '—';
+						connEl.style.color = 'rgba(255, 255, 255, 0.5)';
+					}
+					connEl.title = '连接模式: ' + (ct || 'unknown');
+				}
+
 				connectionStat.connectionBytesReceived = (stats.general.bytesReceived * 1e-6).toFixed(2) + " MBytes";
 				connectionStat.connectionBytesSent = (stats.general.bytesSent * 1e-6).toFixed(2) + " MBytes";
 				connectionStat.connectionAvailableBandwidth = (parseInt(stats.general.availableReceiveBandwidth) / 1e+6).toFixed(2) + " mbps";
@@ -1070,13 +1106,16 @@ export default function webrtc() {
 				statsStart = now;
 				window.fps = connectionStat.connectionFrameRate
 
-				webrtc.sendDataChannelMessage(`_stats_video,${JSON.stringify(stats.allReports)}`);
+				if (webrtc._send_channel !== null && webrtc._send_channel.readyState === 'open') {
+					webrtc.sendDataChannelMessage(`_stats_video,${JSON.stringify(stats.allReports)}`);
+				}
 			});
 		// Stats refresh interval (1000 ms)
 		}, 1000);
 	}
 
 	function handleWindowFocus() {
+		if (webrtc._send_channel === null || webrtc._send_channel.readyState !== 'open') return;
 		// reset keyboard to avoid stuck keys.
 		webrtc.sendDataChannelMessage("kr");
 		// clipboard interface is only available in secure context
@@ -1093,6 +1132,7 @@ export default function webrtc() {
 	}
 
 	function handleWindowBlur() {
+		if (webrtc._send_channel === null || webrtc._send_channel.readyState !== 'open') return;
 		// reset keyboard to avoid stuck keys.
 		webrtc.sendDataChannelMessage("kr");
 	}
@@ -1231,6 +1271,13 @@ export default function webrtc() {
 				}
 			});
 			taskbar.appendChild(imeBtn);
+
+			const connIndicator = document.createElement('div');
+			connIndicator.className = 'taskbar-conn';
+			connIndicator.id = 'conn-indicator';
+			connIndicator.textContent = '—';
+			connIndicator.title = '连接模式';
+			taskbar.appendChild(connIndicator);
 
 			document.body.appendChild(taskbarTrigger);
 			document.body.appendChild(taskbar);
@@ -1617,7 +1664,7 @@ export default function webrtc() {
 							window.is_manual_resolution_mode = true;
 							manualWidth = serverWidth;
 							manualHeight = serverHeight;
-							applyManualStyle(manualWidth, manualHeight, scaleLocallyManual);
+							applyManualStyle(manualWidth, manualHeight, scaleLocal);
 					} else {
 							console.warn("Server dictated manual mode but did not provide valid dimensions.");
 					}
@@ -1647,15 +1694,14 @@ export default function webrtc() {
 				});
 			}
 
-			// Fetch RTC configuration containing STUN/TURN servers.
+			// Fetch RTC configuration (ICE servers are optional with ICE-TCP).
+			// The server provides a TCP passive candidate in the SDP answer,
+			// so STUN/TURN are not required for connectivity.
 			fetch("./turn")
 				.then(function (response) {
 					return response.json();
 				})
 				.then((config) => {
-					// for debugging, force use of relay server.
-					webrtc.forceTurn = turnSwitch;
-
 					// get initial local resolution
 					windowResolution = input.getWindowResolution();
 					signaling.currRes = windowResolution;
@@ -1665,12 +1711,20 @@ export default function webrtc() {
 							webrtc.element.style.height = windowResolution[1]/window.devicePixelRatio+'px';
 					}
 
-					if (config.iceServers.length > 1) {
-							debugEntries.push(applyTimestamp("using TURN servers: " + config.iceServers[1].urls.join(", ")));
+					// Apply ICE servers from server config if available
+					if (config.iceServers && config.iceServers.length > 0) {
+							webrtc.rtcPeerConfig.iceServers = config.iceServers;
+							debugEntries.push(applyTimestamp("ICE servers configured: " + config.iceServers.length));
 					} else {
-							debugEntries.push(applyTimestamp("no TURN servers found."));
+							debugEntries.push(applyTimestamp("No external ICE servers, using ICE-TCP only."));
 					}
-					webrtc.rtcPeerConfig = config;
+					webrtc.connect();
+				})
+				.catch(() => {
+					// If /turn fetch fails, connect anyway — ICE-TCP doesn't need STUN/TURN
+					windowResolution = input.getWindowResolution();
+					signaling.currRes = windowResolution;
+					debugEntries.push(applyTimestamp("ICE config fetch failed, using ICE-TCP only."));
 					webrtc.connect();
 				});
 		},
@@ -1728,7 +1782,7 @@ export default function webrtc() {
 			rtime = null;
 			rdelta = 500;
 			rtimeout = false;
-			manualWidth, manualHeight = 0;
+			manualWidth = manualHeight = 0;
 			videoConnected = "";
 			audioConnected = "";
 			statWatchEnabled = false;

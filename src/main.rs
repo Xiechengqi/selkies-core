@@ -229,6 +229,7 @@ fn run(
     let mut prev_window_count: usize = 0;
     let mut keyframe_buf: Vec<Vec<u8>> = Vec::new();
     let mut in_keyframe = false;
+    let mut last_render = Instant::now();
     let mut prev_button_mask: u32 = 0;
     let mut prev_cursor_name: String = "default".to_string();
     let mut prev_taskbar_json: String = String::new();
@@ -240,9 +241,9 @@ fn run(
         event_loop.dispatch(Some(Duration::from_millis(1)), &mut comp)?;
         comp.space.refresh();
         comp.popups.cleanup();
-        comp.display_handle.flush_clients().unwrap();
+        comp.display_handle.flush_clients().ok();
         drain_input_events(&mut input_rx, &mut comp, &shared_state, &mut prev_button_mask);
-        comp.display_handle.flush_clients().unwrap(); // flush injected input events immediately
+        comp.display_handle.flush_clients().ok(); // flush injected input events immediately
 
         // Read clipboard from Wayland client (remote → browser)
         if let Some(fd) = comp.clipboard_read_fd.take() {
@@ -397,7 +398,7 @@ fn run(
         // Send frame callbacks BEFORE sleep so clients have the full
         // frame period to prepare and commit their next buffer.
         backend.send_frame_callbacks(&comp);
-        comp.display_handle.flush_clients().unwrap();
+        comp.display_handle.flush_clients().ok();
 
         // Frame timing — clients are working in parallel during this sleep
         let elapsed = last_frame.elapsed();
@@ -408,19 +409,31 @@ fn run(
 
         // Quick dispatch to pick up commits that arrived during sleep
         event_loop.dispatch(Some(Duration::ZERO), &mut comp)?;
-        comp.display_handle.flush_clients().unwrap();
+        comp.display_handle.flush_clients().ok();
 
         // Render + encode if any client committed new content
+        // Also force periodic renders when sessions are active to ensure
+        // the browser always has decodable video frames.
+        let has_sessions = shared_state.text_sender.receiver_count() > 0;
+        if !comp.needs_redraw && has_sessions && last_render.elapsed() >= Duration::from_secs(1) {
+            comp.needs_redraw = true;
+        }
         if comp.needs_redraw {
             comp.needs_redraw = false;
-            if let Some(pixels) = backend.render_frame(&mut comp) {
-                render_frames += 1;
-                if let Err(e) = pipeline.push_frame(&pixels) {
-                    warn!("Failed to push frame: {}", e);
-                    continue;
+            match backend.render_frame(&mut comp) {
+                Some(pixels) => {
+                    render_frames += 1;
+                    last_render = Instant::now();
+                    if let Err(e) = pipeline.push_frame(&pixels) {
+                        warn!("Failed to push frame: {}", e);
+                        continue;
+                    }
+                    frame_count += 1;
+                    byte_count += pixels.len() as u64;
                 }
-                frame_count += 1;
-                byte_count += pixels.len() as u64;
+                None => {
+                    warn!("render_frame returned None (windows={})", comp.space.elements().count());
+                }
             }
         }
 
@@ -813,12 +826,13 @@ fn keysym_to_keycode(keysym: u32) -> u32 {
 
 /// Check if an RTP packet contains an H.264 keyframe NAL unit.
 fn is_h264_keyframe_packet(data: &[u8]) -> bool {
-    if data.len() < 13 { return false; }
-    let nal_type = data[12] & 0x1F;
+    let hdr_len = webrtc::media_track::rtp_util::header_length(data).unwrap_or(12);
+    if data.len() <= hdr_len { return false; }
+    let nal_type = data[hdr_len] & 0x1F;
     match nal_type {
         5 | 7 | 8 => true,
         24 => true,
-        28 if data.len() > 13 => (data[13] & 0x1F) == 5,
+        28 if data.len() > hdr_len + 1 => (data[hdr_len + 1] & 0x1F) == 5,
         _ => false,
     }
 }
@@ -890,6 +904,18 @@ async fn run_async_services(
 
     // Session manager (WebRTC)
     let session_manager = if config.webrtc.enabled {
+        // Resolve a routable IP for the ICE-TCP candidate.
+        // 0.0.0.0 is not valid in SDP — the browser needs an actual address.
+        let bind_ip: std::net::IpAddr = config.http.host.parse().unwrap_or(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        );
+        let candidate_ip = if bind_ip.is_unspecified() {
+            detect_local_ip().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        } else {
+            bind_ip
+        };
+        let listen_addr = std::net::SocketAddr::new(candidate_ip, config.http.port);
+        info!("ICE-TCP candidate address: {}", listen_addr);
         let sm = SessionManager::new(
             config.webrtc.clone(),
             shared.input_sender.clone(),
@@ -897,7 +923,7 @@ async fn run_async_services(
             runtime_settings.clone(),
             shared.clone(),
             16,
-            true,
+            listen_addr,
         );
         Some(Arc::new(sm))
     } else {
@@ -996,6 +1022,14 @@ fn apply_cli_overrides(config: &mut Config, args: &Args) {
     if let Some(p) = args.webrtc_tcp_mux_port {
         config.webrtc.tcp_mux_port = p;
     }
+}
+
+/// Detect a routable local IP address by connecting a UDP socket to a public address.
+/// The socket is never actually sent — this just lets the OS pick the right source IP.
+fn detect_local_ip() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    Some(socket.local_addr().ok()?.ip())
 }
 
 /// Set up GTK CSS to hide headerbars on fullscreen windows.

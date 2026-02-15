@@ -4,9 +4,12 @@ use crate::compositor::{grabs::resize_grab, state::ClientState, Compositor};
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_shm,
-    reexports::wayland_server::{
-        protocol::{wl_buffer, wl_surface::WlSurface},
-        Client, Resource,
+    reexports::{
+        wayland_protocols::xdg::shell::server::xdg_toplevel,
+        wayland_server::{
+            protocol::{wl_buffer, wl_surface::WlSurface},
+            Client, Resource,
+        },
     },
     wayland::{
         buffer::BufferHandler,
@@ -108,9 +111,33 @@ impl CompositorHandler for Compositor {
                         self.space.map_element(window, (x, y), true);
                     }
                 } else if !self.titlebar_adjusted.contains(&surface_id) {
-                    // No longer forcing fullscreen - windows keep their natural size and headerbars.
-                    // This allows dialogs and popups to display correctly with their controls visible.
-                    self.titlebar_adjusted.insert(surface_id);
+                    // CSD compensation: GTK CSS hides the headerbar but the app
+                    // still reserves space for it, shrinking the content area.
+                    // Detect the headerbar height and enlarge the window to compensate.
+                    let titlebar_h = if geo.loc.y > 0 {
+                        geo.loc.y
+                    } else if geo.size.h > 0 && geo.size.h < out_size.h {
+                        out_size.h - geo.size.h
+                    } else {
+                        0
+                    };
+
+                    if titlebar_h > 0 && self.csd_retry_count < 3 {
+                        self.csd_retry_count += 1;
+                        self.titlebar_adjusted.insert(surface_id);
+                        let toplevel = window.toplevel().unwrap();
+                        toplevel.with_pending_state(|state| {
+                            state.states.set(xdg_toplevel::State::Fullscreen);
+                            state.size = Some((out_size.w, out_size.h + titlebar_h).into());
+                        });
+                        toplevel.send_pending_configure();
+                        log::info!(
+                            "CSD compensate: surface {} geo={:?} bbox={:?} output={}x{} adding {}px",
+                            surface_id, geo, bbox, out_size.w, out_size.h, titlebar_h
+                        );
+                    } else {
+                        self.titlebar_adjusted.insert(surface_id);
+                    }
                 }
             }
         }

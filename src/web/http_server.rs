@@ -1,6 +1,10 @@
-//! HTTP server for health checks and WebRTC signaling
+//! HTTP server with same-port ICE-TCP protocol splitting
 //!
-//! Provides health check endpoints, metrics, and WebRTC signaling WebSocket.
+//! Provides health check endpoints, metrics, WebRTC signaling WebSocket,
+//! and same-port HTTP + ICE-TCP multiplexing. Incoming TCP connections are
+//! classified by peeking the first byte:
+//! - ASCII letters (HTTP methods) → axum HTTP handler
+//! - 0x00-0x03 (STUN) or 0x14-0x17 (DTLS) → WebRTC ICE-TCP session
 
 #![allow(dead_code)]
 
@@ -17,10 +21,13 @@ use axum::{
     Router,
 };
 
-use log::info;
+use hyper_util::rt::TokioIo;
+use log::{info, warn, debug};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
+use tower::Service;
 use tower_http::services::{ServeDir, ServeFile};
 use base64::Engine;
 use hmac::{Hmac, Mac};
@@ -29,7 +36,25 @@ use sha1::Sha1;
 
 use crate::webrtc::SessionManager;
 
-/// Run the HTTP server with WebRTC signaling support
+/// Classify a TCP connection by its first byte.
+fn classify_first_byte(byte: u8) -> ConnectionType {
+    match byte {
+        // STUN: first byte 0x00-0x03
+        0x00..=0x03 => ConnectionType::IceTcp,
+        // DTLS: first byte 0x14-0x17 (ChangeCipherSpec, Alert, Handshake, ApplicationData)
+        0x14..=0x17 => ConnectionType::IceTcp,
+        // Everything else is HTTP (GET, POST, HEAD, DELETE, OPTIONS, CONNECT, TRACE, PUT, PATCH)
+        _ => ConnectionType::Http,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionType {
+    Http,
+    IceTcp,
+}
+
+/// Run the HTTP server with WebRTC signaling support and same-port ICE-TCP
 pub async fn run_http_server_with_webrtc(
     port: u16,
     state: Arc<SharedState>,
@@ -68,7 +93,7 @@ pub async fn run_http_server_with_webrtc(
         .route("/turn", get(turn_config_handler));
 
     // Add WebRTC signaling endpoint if session manager is provided
-    if let Some(manager) = session_manager {
+    if let Some(ref manager) = session_manager {
         info!("Adding WebRTC signaling endpoint at /webrtc");
         let state_clone = state.clone();
         let manager_clone = manager.clone();
@@ -106,13 +131,90 @@ pub async fn run_http_server_with_webrtc(
     let app = app.layer(middleware::from_fn_with_state(auth_state, basic_auth_middleware));
 
     let listener = TcpListener::bind(&addr).await?;
-    info!("HTTP server listening on http://{}", addr);
+    let local_addr = listener.local_addr()?;
+    info!("HTTP+ICE-TCP server listening on http://{}", local_addr);
 
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    if session_manager.is_some() {
+        info!("Same-port ICE-TCP multiplexing enabled on :{}", port);
+    }
 
-    Ok(())
+    // Accept loop with first-byte protocol splitting
+    loop {
+        let (tcp_stream, peer_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                warn!("TCP accept error: {}", e);
+                continue;
+            }
+        };
+
+        let app = app.clone();
+        let sm = session_manager.clone();
+
+        tokio::spawn(async move {
+            // Peek the first byte to classify the connection (with timeout
+            // to prevent slow/idle connections from blocking a task forever)
+            let mut first_byte = [0u8; 1];
+            let mut stream = tcp_stream;
+            let peek_result = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                stream.peek(&mut first_byte),
+            ).await;
+            match peek_result {
+                Ok(Ok(0)) | Err(_) => return, // Closed or timed out
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    debug!("Peek error from {}: {}", peer_addr, e);
+                    return;
+                }
+            }
+
+            match classify_first_byte(first_byte[0]) {
+                ConnectionType::IceTcp => {
+                    if let Some(sm) = sm {
+                        // Read the first packet for session matching
+                        let mut buf = vec![0u8; 4096];
+                        match stream.read(&mut buf).await {
+                            Ok(0) => return,
+                            Ok(n) => {
+                                buf.truncate(n);
+                                debug!("ICE-TCP connection from {} ({} bytes, first=0x{:02x})",
+                                    peer_addr, n, first_byte[0]);
+                                if let Err(e) = sm.handle_ice_tcp_connection(
+                                    stream, peer_addr, local_addr, &buf,
+                                ).await {
+                                    warn!("ICE-TCP session match failed from {}: {}", peer_addr, e);
+                                }
+                            }
+                            Err(e) => {
+                                debug!("ICE-TCP read error from {}: {}", peer_addr, e);
+                            }
+                        }
+                    } else {
+                        debug!("ICE-TCP connection from {} but no session manager", peer_addr);
+                    }
+                }
+                ConnectionType::Http => {
+                    // Serve HTTP via hyper with the axum router
+                    let io = TokioIo::new(stream);
+                    let service = hyper::service::service_fn(move |req| {
+                        let mut app = app.clone();
+                        async move {
+                            app.call(req).await
+                        }
+                    });
+                    if let Err(e) = hyper_util::server::conn::auto::Builder::new(
+                        hyper_util::rt::TokioExecutor::new(),
+                    )
+                    .serve_connection_with_upgrades(io, service)
+                    .await
+                    {
+                        debug!("HTTP connection error from {}: {}", peer_addr, e);
+                    }
+                }
+            }
+        });
+    }
 }
 
 /// Health check handler

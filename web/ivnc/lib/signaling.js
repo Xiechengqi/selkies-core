@@ -96,6 +96,12 @@ export class WebRTCDemoSignaling {
          * @event
          * @type {function}
          */
+        this.onready = null;
+
+        /**
+         * @event
+         * @type {function}
+         */
         this.ondisconnect = null;
 
         /**
@@ -178,7 +184,6 @@ export class WebRTCDemoSignaling {
      * @event
      */
     _onServerOpen() {
-        // Send local device resolution and scaling with HELLO message.
         this.state = 'connected';
         this._ws_conn.send(`HELLO ${this.peer_id}`);
         this._setStatus("Registering with server, peer ID: " + this.peer_id);
@@ -231,8 +236,12 @@ export class WebRTCDemoSignaling {
             return;
         }
 
-        if (event.data === "SESSION_OK") { 
-            this._setStatus("Session established with peer.");
+        if (event.data === "SESSION_OK") {
+            this._setStatus("Session established, creating offer.");
+            // Signal the WebRTCDemo to create and send an offer
+            if (this.onready !== null) {
+                this.onready();
+            }
             return;
         }
 

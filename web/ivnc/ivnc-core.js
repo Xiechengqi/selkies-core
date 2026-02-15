@@ -4,7 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-import webrtc from "./ivnc-wr-core.js?v=46";
+import webrtc from "./ivnc-wr-core.js?v=50";
 
 const mode = webrtc();
 mode.initialize();

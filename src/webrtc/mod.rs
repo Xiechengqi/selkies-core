@@ -1,22 +1,20 @@
-//! WebRTC streaming implementation
+//! WebRTC streaming implementation (str0m Sans-I/O)
 //!
 //! This module provides WebRTC-based video streaming with:
-//! - Peer connection management
-//! - SDP/ICE signaling
-//! - RTP video transmission
+//! - str0m Sans-I/O peer connection management
+//! - Same-port HTTP + ICE-TCP protocol multiplexing
+//! - RTP video/audio transmission
 //! - DataChannel for input events
 
-pub mod peer_connection;
-pub mod signaling;
 pub mod data_channel;
 pub mod media_track;
+pub mod rtc_session;
 pub mod session;
+pub mod signaling;
+pub mod tcp_framing;
 
-pub use signaling::SignalingMessage;
 pub use session::SessionManager;
-
-#[allow(unused_imports)]
-pub use session::WebRTCSession;
+pub use signaling::SignalingMessage;
 
 use std::error::Error;
 use std::fmt;

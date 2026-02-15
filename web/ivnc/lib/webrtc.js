@@ -76,15 +76,7 @@ export class WebRTCDemo {
 		 * @type {Object}
 		 */
 		this.rtcPeerConfig = {
-			"lifetimeDuration": "86400s",
-			"iceServers": [
-				{
-					"urls": [
-							"stun:stun.l.google.com:19302"
-					]
-				},
-			],
-			"blockStatus": "NOT_BLOCKED",
+			"iceServers": [],
 			"iceTransportPolicy": "all"
 		};
 
@@ -166,6 +158,7 @@ export class WebRTCDemo {
 		// Bind signaling server callbacks.
 		this.signaling.onsdp = this._onSDP.bind(this);
 		this.signaling.onice = this._onSignalingICE.bind(this);
+		this.signaling.onready = this._onReady.bind(this);
 
 		/**
 		 * @type {boolean}
@@ -256,11 +249,7 @@ export class WebRTCDemo {
 	 */
 	_onSignalingICE(icecandidate) {
 		this._setDebug("received ice candidate from signaling server: " + JSON.stringify(icecandidate));
-		if (this.forceTurn && JSON.stringify(icecandidate).indexOf("relay") < 0) { // if no relay address is found, assuming it means no TURN server
-			this._setDebug("Rejecting non-relay ICE candidate: " + JSON.stringify(icecandidate));
-			return;
-		}
-		this.peerConnection.addIceCandidate(icecandidate).catch(this._setError);
+		this.peerConnection.addIceCandidate(icecandidate).catch((e) => this._setError(e.message || e));
 	}
 
 	/**
@@ -279,60 +268,88 @@ export class WebRTCDemo {
 	}
 
 	/**
+	 * Called when the signaling server is ready (SESSION_OK).
+	 * Creates an SDP offer and sends it to the server.
+	 * With str0m ICE-lite, the browser initiates the offer.
+	 */
+	_onReady() {
+		this._setDebug("Server ready, creating SDP offer");
+		this.peerConnection.createOffer()
+			.then((offer) => {
+				// Set sps-pps-idr-in-keyframe=1
+				if (!(/[^-]sps-pps-idr-in-keyframe=1[^\d]/gm.test(offer.sdp)) && (/[^-]packetization-mode=/gm.test(offer.sdp))) {
+					console.log("Overriding WebRTC SDP to include sps-pps-idr-in-keyframe=1");
+					if (/[^-]sps-pps-idr-in-keyframe=\d+/gm.test(offer.sdp)) {
+						offer.sdp = offer.sdp.replace(/sps-pps-idr-in-keyframe=\d+/gm, 'sps-pps-idr-in-keyframe=1');
+					} else {
+						offer.sdp = offer.sdp.replace('packetization-mode=', 'sps-pps-idr-in-keyframe=1;packetization-mode=');
+					}
+				}
+				if (offer.sdp.indexOf('multiopus') === -1) {
+					if (!(/[^-]stereo=1[^\d]/gm.test(offer.sdp)) && (/[^-]useinbandfec=/gm.test(offer.sdp))) {
+						console.log("Overriding WebRTC SDP to allow stereo audio");
+						if (/[^-]stereo=\d+/gm.test(offer.sdp)) {
+							offer.sdp = offer.sdp.replace(/stereo=\d+/gm, 'stereo=1');
+						} else {
+							offer.sdp = offer.sdp.replace('useinbandfec=', 'stereo=1;useinbandfec=');
+						}
+					}
+					if (!(/[^-]minptime=10[^\d]/gm.test(offer.sdp)) && (/[^-]useinbandfec=/gm.test(offer.sdp))) {
+						console.log("Overriding WebRTC SDP to allow low-latency audio packet");
+						if (/[^-]minptime=\d+/gm.test(offer.sdp)) {
+							offer.sdp = offer.sdp.replace(/minptime=\d+/gm, 'minptime=10');
+						} else {
+							offer.sdp = offer.sdp.replace('useinbandfec=', 'minptime=10;useinbandfec=');
+						}
+					}
+				}
+				console.log("Created local SDP offer", offer);
+				return this.peerConnection.setLocalDescription(offer);
+			})
+			.then(() => {
+				this._setDebug("Sending SDP offer to server");
+				this.signaling.sendSDP(this.peerConnection.localDescription);
+			})
+			.catch((e) => {
+				this._setError("Error creating SDP offer: " + e.message);
+			});
+	}
+
+	/**
 	 * Handles incoming SDP from signaling server.
-	 * Sets the remote description on the peer connection,
-	 * creates an answer with a local description and sends that to the peer.
+	 * With str0m ICE-lite, the server returns an answer to our offer.
 	 *
 	 * @param {RTCSessionDescription} sdp
 	 */
 	_onSDP(sdp) {
-		if (sdp.type != "offer") {
-				this._setError("received SDP was not type offer.");
-				return;
-		}
-		console.log("Received remote SDP", sdp);
-		this.peerConnection.setRemoteDescription(sdp).then(() => {
-			this._setDebug("received SDP offer, creating answer");
-			this.peerConnection.createAnswer()
-			.then((local_sdp) => {
-				// Set sps-pps-idr-in-keyframe=1
-				if (!(/[^-]sps-pps-idr-in-keyframe=1[^\d]/gm.test(local_sdp.sdp)) && (/[^-]packetization-mode=/gm.test(local_sdp.sdp))) {
-					console.log("Overriding WebRTC SDP to include sps-pps-idr-in-keyframe=1");
-					if (/[^-]sps-pps-idr-in-keyframe=\d+/gm.test(local_sdp.sdp)) {
-						local_sdp.sdp = local_sdp.sdp.replace(/sps-pps-idr-in-keyframe=\d+/gm, 'sps-pps-idr-in-keyframe=1');
-					} else {
-						local_sdp.sdp = local_sdp.sdp.replace('packetization-mode=', 'sps-pps-idr-in-keyframe=1;packetization-mode=');
-					}
-				}
-				if (local_sdp.sdp.indexOf('multiopus') === -1) {
-					// Override SDP to enable stereo on WebRTC Opus with Chromium, must be munged before the Local Description
-					if (!(/[^-]stereo=1[^\d]/gm.test(local_sdp.sdp)) && (/[^-]useinbandfec=/gm.test(local_sdp.sdp))) {
-						console.log("Overriding WebRTC SDP to allow stereo audio");
-						if (/[^-]stereo=\d+/gm.test(local_sdp.sdp)) {
-							local_sdp.sdp = local_sdp.sdp.replace(/stereo=\d+/gm, 'stereo=1');
-						} else {
-							local_sdp.sdp = local_sdp.sdp.replace('useinbandfec=', 'stereo=1;useinbandfec=');
-						}
-					}
-					// OPUS_FRAME: Override SDP to reduce packet size to 10 ms
-					if (!(/[^-]minptime=10[^\d]/gm.test(local_sdp.sdp)) && (/[^-]useinbandfec=/gm.test(local_sdp.sdp))) {
-						console.log("Overriding WebRTC SDP to allow low-latency audio packet");
-						if (/[^-]minptime=\d+/gm.test(local_sdp.sdp)) {
-							local_sdp.sdp = local_sdp.sdp.replace(/minptime=\d+/gm, 'minptime=10');
-						} else {
-							local_sdp.sdp = local_sdp.sdp.replace('useinbandfec=', 'minptime=10;useinbandfec=');
-						}
-					}
-				}
-				console.log("Created local SDP", local_sdp);
-				this.peerConnection.setLocalDescription(local_sdp).then(() => {
-					this._setDebug("Sending SDP answer");
-					this.signaling.sendSDP(this.peerConnection.localDescription);
+		if (sdp.type === "answer") {
+			console.log("Received SDP answer from server", sdp);
+			this.peerConnection.setRemoteDescription(sdp)
+				.then(() => {
+					this._setDebug("Remote SDP answer set successfully");
+				})
+				.catch((e) => {
+					this._setError("Error setting remote SDP answer: " + e.message);
 				});
-			}).catch(() => {
-				this._setError("Error creating local SDP");
+		} else if (sdp.type === "offer") {
+			// Legacy fallback: server-initiated offer
+			console.log("Received remote SDP offer (legacy)", sdp);
+			this.peerConnection.setRemoteDescription(sdp).then(() => {
+				this._setDebug("received SDP offer, creating answer");
+				this.peerConnection.createAnswer()
+				.then((local_sdp) => {
+					console.log("Created local SDP", local_sdp);
+					this.peerConnection.setLocalDescription(local_sdp).then(() => {
+						this._setDebug("Sending SDP answer");
+						this.signaling.sendSDP(this.peerConnection.localDescription);
+					});
+				}).catch(() => {
+					this._setError("Error creating local SDP");
+				});
 			});
-		});
+		} else {
+			this._setError("Unexpected SDP type: " + sdp.type);
+		}
 	}
 
 	/**
@@ -393,10 +410,16 @@ export class WebRTCDemo {
 		// Bind the data channel event handlers.
 		this._send_channel = event.channel;
 		this._send_channel.onmessage = this._onPeerDataChannelMessage.bind(this);
-		this._send_channel.onopen = () => {
-			if (this.ondatachannelopen !== null)
+
+		let openFired = false;
+		const fireOpen = () => {
+			if (!openFired && this.ondatachannelopen !== null) {
+				openFired = true;
 				this.ondatachannelopen();
+			}
 		};
+
+		this._send_channel.onopen = fireOpen;
 		this._send_channel.onclose = () => {
 			if (this.ondatachannelclose !== null)
 				this.ondatachannelclose();
@@ -409,8 +432,7 @@ export class WebRTCDemo {
 		// This happens when the server creates the data channel before the
 		// browser's ondatachannel event fires.
 		if (this._send_channel.readyState === 'open') {
-			if (this.ondatachannelopen !== null)
-				this.ondatachannelopen();
+			fireOpen();
 		}
 	}
 
@@ -704,7 +726,7 @@ export class WebRTCDemo {
 		const pollInterval = 50;
 		const start = Date.now();
 
-		return new Promise(resolve => {
+		return new Promise((resolve, reject) => {
 			if (this._aux_channel === null) {
 				resolve();
 				return;
@@ -784,6 +806,7 @@ export class WebRTCDemo {
 					candidatePairs: {},
 					selectedCandidatePairId: null,
 					remoteCandidates: {},
+				localCandidates: {},
 					codecs: {},
 					videoRTP: null,
 					videoTrack: null,
@@ -823,6 +846,8 @@ export class WebRTCDemo {
 						reports.dataChannel = report;
 					} else if (report.type === "remote-candidate") {
 						reports.remoteCandidates[report.id] = report;
+					} else if (report.type === "local-candidate") {
+						reports.localCandidates[report.id] = report;
 					} else if (report.type === "codec") {
 						reports.codecs[report.id] = report;
 					}
@@ -891,7 +916,10 @@ export class WebRTCDemo {
 							connectionDetails.general.currentRoundTripTime = candidatePair.currentRoundTripTime;
 						}
 						var remoteCandidate = reports.remoteCandidates[candidatePair.remoteCandidateId];
-						if (remoteCandidate !== undefined) {
+						var localCandidate = reports.localCandidates[candidatePair.localCandidateId];
+						if (localCandidate !== undefined && localCandidate.candidateType === 'relay') {
+							connectionDetails.general.connectionType = 'relay';
+						} else if (remoteCandidate !== undefined) {
 							connectionDetails.general.connectionType = remoteCandidate.candidateType;
 						}
 					}
@@ -935,12 +963,12 @@ export class WebRTCDemo {
 		if (!this.element.srcObject) {
 			this.element.load();
 		}
-
 		var playPromise = this.element.play();
 		if (playPromise !== undefined) {
 			playPromise.then(() => {
 				this._setDebug("Stream is playing.");
 			}).catch((e) => {
+				console.error("play() rejected:", e.message);
 				if (this.onplaystreamrequired !== null) {
 					this.onplaystreamrequired();
 				} else {
@@ -956,6 +984,10 @@ export class WebRTCDemo {
 	 */
 	connect() {
 		// Create the peer connection object and bind callbacks.
+		// NOTE: iceTransportPolicy:"relay" is not used even when forceTurn is set,
+		// because the TURN server does not support hairpin (relay-to-relay on the
+		// same server returns 403 Forbidden). ICE will naturally use TURN relay
+		// when direct connectivity is not available.
 		this.peerConnection = new RTCPeerConnection(this.rtcPeerConfig);
 		this.peerConnection.ontrack = this._ontrack.bind(this);
 		this.peerConnection.onicecandidate = this._onPeerICE.bind(this);
@@ -968,13 +1000,6 @@ export class WebRTCDemo {
 			// Pass state to event listeners.
 			this._setConnectionState(this.peerConnection.connectionState);
 		};
-
-		if (this.forceTurn) {
-			this._setStatus("forcing use of TURN server");
-			var config = this.peerConnection.getConfiguration();
-			config.iceTransportPolicy = "relay";
-			this.peerConnection.setConfiguration(config);
-		}
 
 		this.signaling.peer_id = this.peer_id;
 		this.signaling.connect();

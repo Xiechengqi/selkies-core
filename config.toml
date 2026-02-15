@@ -18,7 +18,7 @@ refresh_rate = 60
 [http]
 # HTTP server bind address
 host = "0.0.0.0"
-# HTTP server port (for health checks and WebRTC signaling)
+# HTTP server port (serves HTTP, WebSocket signaling, and ICE-TCP on the same port)
 port = 8000
 # Enable HTTP basic authentication
 basic_auth_enabled = true
@@ -71,15 +71,15 @@ format = "json"
 
 # ============================================================================
 # WebRTC Configuration
+#
+# iVnc uses str0m ICE-lite with TCP transport. All WebRTC traffic (signaling,
+# media, data channels) flows through the same HTTP port via protocol splitting.
+# No STUN/TURN servers are required for typical deployments.
 # ============================================================================
 
 [webrtc]
-# Enable WebRTC streaming (default: true if feature is enabled)
+# Enable WebRTC streaming
 enabled = true
-# Network profile: "lan" or "wan" (optional)
-network_profile = ""
-# Enable Trickle ICE (send candidates as they are found)
-ice_trickle = true
 
 # Video codec: "h264", "vp8", "vp9", "av1"
 video_codec = "h264"
@@ -87,34 +87,8 @@ video_codec = "h264"
 # Target video bitrate in kbps
 video_bitrate = 8000
 
-# Maximum video bitrate in kbps
-video_bitrate_max = 16000
-
-# Minimum video bitrate in kbps
-video_bitrate_min = 1000
-
 # Hardware encoder: "auto", "software", "vaapi", "nvenc", "qsv"
-# - auto: Automatically detect best available encoder
-# - software: Use CPU-based encoding (x264enc, vp8enc, etc.)
-# - vaapi: Intel/AMD VA-API hardware encoding
-# - nvenc: NVIDIA NVENC hardware encoding
-# - qsv: Intel Quick Sync Video hardware encoding
 hardware_encoder = "auto"
-
-# Enable adaptive bitrate control
-adaptive_bitrate = true
-
-# Congestion control algorithm: "goog-remb" or "transport-cc"
-congestion_control = "goog-remb"
-
-# Maximum latency target in milliseconds
-max_latency_ms = 100
-
-# Enable forward error correction (FEC)
-fec_enabled = false
-
-# Enable retransmissions (RTX)
-rtx_enabled = true
 
 # GStreamer pipeline latency in milliseconds
 pipeline_latency_ms = 50
@@ -122,45 +96,13 @@ pipeline_latency_ms = 50
 # Keyframe interval in frames (lower = more keyframes = better error recovery)
 keyframe_interval = 60
 
-# NAT 1:1 external IP mappings (optional)
-nat1to1_ips = []
-
-# URL to fetch external IP if nat1to1_ips is empty (optional)
-ip_retrieval_url = ""
-
-# STUN host/port (optional)
-stun_host = "stun.l.google.com"
-stun_port = 19302
-
-# TURN settings (optional)
-turn_host = ""
-turn_port = 3478
-turn_protocol = "udp"
-turn_tls = false
-turn_shared_secret = ""
-turn_username = ""
-turn_password = ""
-
-# Ephemeral UDP port range for ICE (optional)
-ephemeral_udp_port_range = [59000, 59100]
-
-# Single UDP mux port for all peers (0 to disable)
-udp_mux_port = 0
-
-# Single TCP mux port for all peers (0 to disable)
-tcp_mux_port = 0
-
-# ICE servers for NAT traversal (STUN/TURN)
-# Multiple servers can be configured for redundancy
-[[webrtc.ice_servers]]
-urls = ["stun:stun.l.google.com:19302"]
-
-# Example TURN server configuration (uncomment to use)
-# [[webrtc.ice_servers]]
-# urls = ["turn:turn.example.com:3478"]
-# username = "your-username"
-# credential = "your-password"
-
-# Additional public STUN servers (optional)
-# [[webrtc.ice_servers]]
-# urls = ["stun:stun1.l.google.com:19302", "stun:stun2.l.google.com:19302"]
+# Optional STUN/TURN servers for browser ICE candidates (usually not needed
+# with ICE-TCP, but can be configured as fallback for restrictive networks)
+# stun_host = "stun.l.google.com"
+# stun_port = 19302
+# turn_host = ""
+# turn_port = 3478
+# turn_protocol = "udp"
+# turn_tls = false
+# turn_username = ""
+# turn_password = ""

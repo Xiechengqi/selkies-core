@@ -1,15 +1,16 @@
-//! WebRTC Signaling Server
+//! WebRTC Signaling Server (str0m)
 //!
 //! Handles WebRTC signaling over WebSocket connections.
-//! Provides SDP offer/answer exchange and ICE candidate transmission.
+//! With str0m, the flow is:
+//! 1. Browser sends SDP offer via WebSocket
+//! 2. Server creates str0m Rtc, accepts offer, returns answer with TCP candidate
+//! 3. Browser connects via ICE-TCP to the same port
+//! 4. TCP protocol splitter routes the connection to the matching session
 
 #![allow(dead_code)]
 
-use crate::webrtc::{
-    SignalingMessage, SessionManager,
-};
+use crate::webrtc::{SignalingMessage, SessionManager};
 use crate::webrtc::signaling::SignalingParser;
-use crate::webrtc::peer_connection::PeerConnectionManager;
 use crate::web::SharedState;
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
@@ -72,20 +73,7 @@ pub async fn handle_signaling_connection(
                 let text_str: &str = text.as_ref();
 
                 if let Some(reply) = handle_gstreamer_control_message(text_str, &mut wire_format) {
-                    // Send the control reply first (HELLO or SESSION_OK)
-                    let _ = tx.send(reply.clone());
-                    if reply == "SESSION_OK" {
-                        if let Some(payload) = handle_gstreamer_session_request(
-                            &mut session_id,
-                            &state,
-                            &session_manager,
-                            &tx,
-                        )
-                        .await
-                        {
-                            let _ = tx.send(payload);
-                        }
-                    }
+                    let _ = tx.send(reply);
                     continue;
                 }
 
@@ -98,9 +86,7 @@ pub async fn handle_signaling_connection(
                         &session_manager,
                         &tx,
                         wire_format,
-                    )
-                    .await
-                    {
+                    ).await {
                         let _ = tx.send(response);
                     }
                     continue;
@@ -115,9 +101,7 @@ pub async fn handle_signaling_connection(
                             &session_manager,
                             &tx,
                             wire_format,
-                        )
-                        .await
-                        {
+                        ).await {
                             let _ = tx.send(response);
                         }
                     }
@@ -135,11 +119,9 @@ pub async fn handle_signaling_connection(
                 }
             }
             Ok(Message::Binary(_)) => {
-                // Binary messages not used for signaling
                 debug!("Received binary message on signaling channel");
             }
             Ok(Message::Ping(_data)) => {
-                // Respond to ping
                 debug!("Received ping on signaling channel");
             }
             Ok(Message::Close(_)) => {
@@ -154,17 +136,24 @@ pub async fn handle_signaling_connection(
         }
     }
 
-    // Clean up session if created
-    if let Some(id) = session_id {
-        session_manager.remove_session(&id).await;
-        info!("Cleaned up WebRTC session: {}", id);
-    }
-
     // Clean up send task
     send_task.abort();
+
+    // Clean up pending session if the WebSocket closes before ICE-TCP connects
+    if let Some(ref sid) = session_id {
+        session_manager.remove_pending_session(sid).await;
+    }
+
+    info!("Signaling connection handler finished (session: {:?})", session_id);
 }
 
-/// Handle a single signaling message
+/// Handle a single signaling message.
+///
+/// With str0m, the signaling flow is simpler:
+/// - Offer → create_session_with_offer() → returns answer with TCP candidate
+/// - No ICE trickle needed (server injects a single TCP passive candidate)
+/// - No ICE candidate forwarding from server to browser
+/// - Browser ICE candidates are ignored (ICE-lite server doesn't need them)
 async fn handle_signaling_message(
     message: SignalingMessage,
     session_id: &mut Option<String>,
@@ -175,83 +164,16 @@ async fn handle_signaling_message(
 ) -> Option<String> {
     match message {
         SignalingMessage::Offer { sdp, session_id: provided_session_id } => {
-            // Create a new session if none exists
-            let session = if let Some(ref id) = *session_id {
-                session_manager.get_session(id).await
-            } else {
-                match session_manager.create_session().await {
-                    Ok(s) => {
-                        *session_id = Some(s.id.clone());
-                        Some(s)
-                    }
-                    Err(e) => {
-                        error!("Failed to create session: {}", e);
-                        let error = SignalingMessage::error(
-                            "SESSION_ERROR",
-                            &e.to_string(),
-                            provided_session_id,
-                        );
-                        return error.to_json().ok();
-                    }
-                }
-            };
+            // Create session and accept offer in one step
+            match session_manager.create_session_with_offer(&sdp).await {
+                Ok((sid, answer_sdp)) => {
+                    *session_id = Some(sid.clone());
+                    info!("Session {} created with SDP answer", sid);
 
-            let session = match session {
-                Some(s) => s,
-                None => {
-                    let error = SignalingMessage::error(
-                        "SESSION_NOT_FOUND",
-                        "Session not found",
-                        session_id.clone(),
-                    );
-                    return error.to_json().ok();
-                }
-            };
-
-            // Handle the offer
-            match session_manager.handle_offer(&session.id, &sdp).await {
-                Ok(answer_sdp) => {
-                    let answer = SignalingMessage::answer(answer_sdp, session.id.clone());
-
-                    if session_manager.config().ice_trickle {
-                        // Set up ICE candidate forwarding
-                        let tx_clone = tx.clone();
-                        let session_id_clone = session.id.clone();
-                        let state_clone = state.clone();
-                        let format_clone = wire_format;
-
-                        crate::webrtc::peer_connection::PeerConnectionManager::setup_ice_callback(
-                            &session.peer_connection,
-                            move |candidate_opt| {
-                                if let Some(candidate) = candidate_opt {
-                                    let (transport, candidate_type) = parse_ice_candidate(&candidate);
-                                    state_clone.record_ice_candidate(transport.as_deref(), candidate_type.as_deref());
-                                    let msg = SignalingMessage::ice_candidate(
-                                        candidate,
-                                        Some("0".to_string()),
-                                        Some(0),
-                                        session_id_clone.clone(),
-                                    );
-                                    if let Some(payload) = format_signaling_message(&msg, format_clone) {
-                                        let _ = tx_clone.send(payload);
-                                    }
-                                } else {
-                                    // ICE gathering complete
-                                    let msg = SignalingMessage::IceComplete {
-                                        session_id: session_id_clone.clone(),
-                                    };
-                                    if let Some(payload) = format_signaling_message(&msg, format_clone) {
-                                        let _ = tx_clone.send(payload);
-                                    }
-                                }
-                            },
-                        ).await;
-                    }
-
-                    // Send ready notification
+                    // Send ready notification (Selkies format)
                     if wire_format == WireFormat::Selkies {
                         let ready = SignalingMessage::ready(
-                            session.id.clone(),
+                            sid.clone(),
                             session_manager.config().video_codec.as_str(),
                             "input",
                         );
@@ -260,67 +182,58 @@ async fn handle_signaling_message(
                         }
                     }
 
+                    // Send ICE gathering complete (no trickle needed with ICE-lite TCP)
+                    if wire_format == WireFormat::Selkies {
+                        let complete = SignalingMessage::IceComplete {
+                            session_id: sid.clone(),
+                        };
+                        if let Some(payload) = format_signaling_message(&complete, wire_format) {
+                            let _ = tx.send(payload);
+                        }
+                    }
+
+                    let answer = SignalingMessage::answer(answer_sdp, sid);
                     format_signaling_message(&answer, wire_format)
                 }
                 Err(e) => {
-                    error!("Failed to handle offer: {}", e);
+                    error!("Failed to create session: {}", e);
                     let error = SignalingMessage::error(
-                        "OFFER_ERROR",
+                        "SESSION_ERROR",
                         &e.to_string(),
-                        Some(session.id.clone()),
+                        provided_session_id,
                     );
                     format_signaling_message(&error, wire_format)
                 }
             }
         }
 
-        SignalingMessage::Answer { sdp, session_id: msg_session_id } => {
-            let target_session_id = session_id.clone().unwrap_or(msg_session_id);
-            let session = match session_manager.get_session(&target_session_id).await {
-                Some(s) => s,
-                None => {
-                    let error = SignalingMessage::error(
-                        "SESSION_NOT_FOUND",
-                        "Session not found",
-                        Some(target_session_id),
-                    );
-                    return format_signaling_message(&error, wire_format);
-                }
-            };
-
-            if let Err(e) = PeerConnectionManager::handle_answer(&session.peer_connection, &sdp).await {
-                let error = SignalingMessage::error("ANSWER_ERROR", &e.to_string(), Some(session.id.clone()));
-                return format_signaling_message(&error, wire_format);
-            }
-
-            session.touch().await;
+        SignalingMessage::Answer { sdp: _, session_id: _msg_session_id } => {
+            // str0m ICE-lite server doesn't process answers from the browser
+            // (we already generated the answer). Log and ignore.
+            debug!("Ignoring SDP answer from browser (ICE-lite server)");
             None
         }
 
-        SignalingMessage::IceCandidate { candidate, sdp_mid, sdp_mline_index, session_id: msg_session_id } => {
-            let target_session_id = session_id.clone().unwrap_or(msg_session_id);
-
-            if let Err(e) = session_manager.add_ice_candidate(
-                &target_session_id,
-                &candidate,
-                sdp_mid.as_deref(),
-                sdp_mline_index,
-            ).await {
-                warn!("Failed to add ICE candidate: {}", e);
-            }
+        SignalingMessage::IceCandidate { candidate, sdp_mid: _, sdp_mline_index: _, session_id: _ } => {
+            // With ICE-lite, we don't need remote candidates from the browser.
+            // The browser will connect to our TCP passive candidate directly.
+            // Record for metrics but don't process.
+            let (transport, candidate_type) = parse_ice_candidate(&candidate);
+            state.record_ice_candidate(transport.as_deref(), candidate_type.as_deref());
+            debug!("Received browser ICE candidate (ignored in ICE-lite mode): {}", &candidate[..candidate.len().min(80)]);
             None
         }
 
         SignalingMessage::KeyframeRequest { session_id: msg_session_id } => {
-            let target_session_id = session_id.clone().unwrap_or(msg_session_id);
-            debug!("Keyframe requested for session {}", target_session_id);
+            let target = session_id.as_deref().unwrap_or(&msg_session_id);
+            debug!("Keyframe requested for session {}", target);
             state.runtime_settings.request_keyframe();
             None
         }
 
         SignalingMessage::BitrateRequest { session_id: msg_session_id, bitrate_kbps } => {
-            let target_session_id = session_id.clone().unwrap_or(msg_session_id);
-            debug!("Bitrate change requested for session {}: {} kbps", target_session_id, bitrate_kbps);
+            let target = session_id.as_deref().unwrap_or(&msg_session_id);
+            debug!("Bitrate change requested for session {}: {} kbps", target, bitrate_kbps);
             state.runtime_settings.set_video_bitrate_kbps(bitrate_kbps);
             None
         }
@@ -331,9 +244,9 @@ async fn handle_signaling_message(
         }
 
         SignalingMessage::Close { session_id: msg_session_id, reason } => {
-            let target_session_id = session_id.clone().unwrap_or(msg_session_id);
-            info!("Session close requested: {} (reason: {:?})", target_session_id, reason);
-            session_manager.remove_session(&target_session_id).await;
+            let target = session_id.clone().unwrap_or(msg_session_id);
+            info!("Session close requested: {} (reason: {:?})", target, reason);
+            session_manager.remove_pending_session(&target).await;
             *session_id = None;
             None
         }
@@ -360,81 +273,6 @@ fn handle_gstreamer_control_message(text: &str, wire_format: &mut WireFormat) ->
     if trimmed.starts_with("SESSION") {
         *wire_format = WireFormat::GStreamer;
         return Some("SESSION_OK".to_string());
-    }
-    None
-}
-
-async fn handle_gstreamer_session_request(
-    session_id: &mut Option<String>,
-    state: &Arc<SharedState>,
-    session_manager: &Arc<SessionManager>,
-    tx: &mpsc::UnboundedSender<String>,
-) -> Option<String> {
-    if session_id.is_none() {
-        match session_manager.create_session().await {
-            Ok(session) => {
-                *session_id = Some(session.id.clone());
-
-                // Set up ICE forwarding (trickle)
-                let tx_clone = tx.clone();
-                let session_id_clone = session.id.clone();
-                let state_clone = state.clone();
-                if session_manager.config().ice_trickle {
-                    PeerConnectionManager::setup_ice_callback(
-                        &session.peer_connection,
-                        move |candidate_opt| {
-                            if let Some(candidate) = candidate_opt {
-                                let (transport, candidate_type) = parse_ice_candidate(&candidate);
-                                state_clone.record_ice_candidate(transport.as_deref(), candidate_type.as_deref());
-                                let msg = SignalingMessage::ice_candidate(
-                                    candidate,
-                                    Some("0".to_string()),
-                                    Some(0),
-                                    session_id_clone.clone(),
-                                );
-                                if let Some(payload) = format_signaling_message(&msg, WireFormat::GStreamer) {
-                                    let _ = tx_clone.send(payload);
-                                }
-                            } else {
-                                let msg = SignalingMessage::IceComplete {
-                                    session_id: session_id_clone.clone(),
-                                };
-                                if let Some(payload) = format_signaling_message(&msg, WireFormat::GStreamer) {
-                                    let _ = tx_clone.send(payload);
-                                }
-                            }
-                        },
-                    )
-                    .await;
-                }
-
-                // Create and send offer
-                match PeerConnectionManager::create_offer(&session.peer_connection).await {
-                    Ok(offer_sdp) => {
-                        let has_video = offer_sdp.contains("m=video");
-                        let has_sendonly = offer_sdp.contains("a=sendonly");
-                        info!(
-                            "Generated offer SDP (video={}, sendonly={}) for session {}",
-                            has_video, has_sendonly, session.id
-                        );
-                        let offer = SignalingMessage::Offer {
-                            sdp: offer_sdp,
-                            session_id: Some(session.id.clone()),
-                        };
-                        return format_signaling_message(&offer, WireFormat::GStreamer);
-                    }
-                    Err(e) => {
-                        error!("Failed to create offer for session {}: {}", session.id, e);
-                        let error = SignalingMessage::error("OFFER_ERROR", &e.to_string(), Some(session.id.clone()));
-                        return format_signaling_message(&error, WireFormat::GStreamer);
-                    }
-                }
-            }
-            Err(e) => {
-                let error = SignalingMessage::error("SESSION_ERROR", &e.to_string(), None);
-                return format_signaling_message(&error, WireFormat::GStreamer);
-            }
-        }
     }
     None
 }
@@ -512,7 +350,6 @@ fn parse_ice_candidate(candidate: &str) -> (Option<String>, Option<String>) {
         return (None, None);
     }
 
-    // candidate:<foundation> <component> <transport> <priority> <ip> <port> typ <type> ...
     let transport = parts.get(2).map(|v| v.to_ascii_lowercase());
     let mut candidate_type = None;
     if let Some(idx) = parts.iter().position(|p| *p == "typ") {

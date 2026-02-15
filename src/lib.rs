@@ -19,4 +19,4 @@ pub mod webrtc;
 pub use config::{Config, WebRTCConfig, VideoCodec, HardwareEncoder};
 pub use input::{InputEvent, InputEventData};
 pub use gstreamer::{VideoPipeline, PipelineConfig};
-pub use webrtc::{SessionManager, WebRTCSession, SignalingMessage};
+pub use webrtc::{SessionManager, SignalingMessage};

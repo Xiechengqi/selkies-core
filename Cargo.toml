@@ -48,7 +48,8 @@ notify = { version = "6.0" }
 # HTTP server for static files / health checks
 axum = { version = "0.8", features = ["ws"] }
 tower = { version = "0.4" }
-hyper = { version = "1.0" }
+hyper = { version = "1.0", features = ["server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 tower-http = { version = "0.5", features = ["fs"] }
 
 # Embedded web assets
@@ -75,14 +76,8 @@ libpulse-binding = { version = "2.28", optional = true }
 mimalloc = "0.1"
 libc = "0.2"
 
-# WebRTC stack
-webrtc = "0.11"
-webrtc-util = "0.9"
-webrtc-ice = "0.11"
-webrtc-dtls = "0.10"
-webrtc-srtp = "0.13"
-webrtc-media = "0.8"
-webrtc-sctp = "0.10"
+# WebRTC stack (str0m Sans-I/O)
+str0m = { path = "../str0m", default-features = false, features = ["aws-lc-rs"] }
 ureq = "2"
 
 # GStreamer bindings
@@ -92,8 +87,7 @@ gstreamer-video = "0.22"
 gstreamer-rtp = "0.22"
 glib = "0.19"
 
-# RTP handling
-rtp = "0.10"
+# Binary data handling
 bytes = "1.5"
 hmac = "0.12"
 sha1 = "0.10"
@@ -121,9 +115,3 @@ panic = "abort"
 [dev-dependencies]
 criterion = "0.5"
 
-[patch.crates-io]
-# Fix: Chrome sends X25519Kyber768 as preferred curve in DTLS ClientHello.
-# Upstream blindly picks the first curve, causing handshake failure.
-# Patch selects the first *supported* curve (P256/P384/X25519) instead.
-# See patches/webrtc-dtls-0.10.0/src/flight/flight0.rs
-webrtc-dtls = { path = "patches/webrtc-dtls-0.10.0" }
