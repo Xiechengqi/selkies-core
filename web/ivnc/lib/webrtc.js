@@ -38,7 +38,6 @@ import { base64ToString, Queue } from "./util.js?v=1";
  * @property {function} onclipboardcontent - Callback fired when clipboard content from the remote host is received.
  * @property {function} getConnectionStats - Returns promise that resolves with connection stats.
  * @property {Objet} rtcPeerConfig - RTC configuration containing ICE servers and other connection properties.
- * @property {boolean} forceTurn - Force use of TURN server.
  * @property {fucntion} sendDataChannelMessage - Send a message to the peer though the data channel.
  */
 export class WebRTCDemo {
@@ -70,7 +69,6 @@ export class WebRTCDemo {
 		/**
 		 * @type {boolean}
 		 */
-		this.forceTurn = false;
 
 		/**
 		 * @type {Object}
@@ -323,8 +321,13 @@ export class WebRTCDemo {
 	 */
 	_onSDP(sdp) {
 		if (sdp.type === "answer") {
-			console.log("Received SDP answer from server", sdp);
-			this.peerConnection.setRemoteDescription(sdp)
+			// Rewrite ICE candidate IPs in the SDP answer to match the host
+			// the browser actually connected to. This is needed when the server
+			// is behind a TCP tunnel/proxy and advertises its internal IP.
+			var rewrittenSdp = this._rewriteCandidateHost(sdp.sdp);
+			var answer = new RTCSessionDescription({ type: "answer", sdp: rewrittenSdp });
+			console.log("Received SDP answer from server (candidates rewritten)", answer);
+			this.peerConnection.setRemoteDescription(answer)
 				.then(() => {
 					this._setDebug("Remote SDP answer set successfully");
 				})
@@ -350,6 +353,22 @@ export class WebRTCDemo {
 		} else {
 			this._setError("Unexpected SDP type: " + sdp.type);
 		}
+	}
+
+	/**
+	 * Rewrite ICE candidate IPs in SDP to match the host the browser
+	 * actually connected to. Needed when the server is behind a tunnel.
+	 * @param {string} sdpText
+	 * @returns {string}
+	 */
+	_rewriteCandidateHost(sdpText) {
+		var host = window.location.hostname;
+		if (!host) return sdpText;
+		// Replace IP addresses in a=candidate lines with the browser's host
+		return sdpText.replace(
+			/^(a=candidate:\S+ \d+ (?:tcp|TCP) \d+ )(\S+)( \d+ typ host.*)/gm,
+			'$1' + host + '$3'
+		);
 	}
 
 	/**
@@ -984,13 +1003,36 @@ export class WebRTCDemo {
 	 */
 	connect() {
 		// Create the peer connection object and bind callbacks.
-		// NOTE: iceTransportPolicy:"relay" is not used even when forceTurn is set,
-		// because the TURN server does not support hairpin (relay-to-relay on the
-		// same server returns 403 Forbidden). ICE will naturally use TURN relay
-		// when direct connectivity is not available.
 		this.peerConnection = new RTCPeerConnection(this.rtcPeerConfig);
+
+		// Add transceivers so the browser offer includes m-lines.
+		// Server is send-only for media; browser is receive-only.
+		this.peerConnection.addTransceiver('video', { direction: 'recvonly' });
+		this.peerConnection.addTransceiver('audio', { direction: 'recvonly' });
+
+		// Create the data channel from the browser side so it appears in the offer.
+		// The server will accept it via str0m's ChannelOpen event.
+		this._send_channel = this.peerConnection.createDataChannel("input", { ordered: true });
+		this._send_channel.onmessage = this._onPeerDataChannelMessage.bind(this);
+		let openFired = false;
+		const fireOpen = () => {
+			if (!openFired && this.ondatachannelopen !== null) {
+				openFired = true;
+				this.ondatachannelopen();
+			}
+		};
+		this._send_channel.onopen = fireOpen;
+		this._send_channel.onclose = () => {
+			if (this.ondatachannelclose !== null)
+				this.ondatachannelclose();
+		};
+		this._send_channel.onerror = () => {
+			this._setError("Unexpected error, data channel closed");
+		};
+
 		this.peerConnection.ontrack = this._ontrack.bind(this);
 		this.peerConnection.onicecandidate = this._onPeerICE.bind(this);
+		// Keep ondatachannel for server-initiated channels (e.g. auxiliary)
 		this.peerConnection.ondatachannel = this._onPeerdDataChannel.bind(this);
 
 		this.peerConnection.onconnectionstatechange = () => {

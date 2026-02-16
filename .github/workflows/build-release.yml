@@ -11,8 +11,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      IVNC_DISABLE_DATA_CHANNEL: "1"
     strategy:
       matrix:
         include:
@@ -27,34 +25,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Checkout smithay
-        uses: actions/checkout@v4
-        with:
-          repository: Smithay/smithay
-          ref: 3d3f9e359352d95cffd1e53287d57df427fcbd34
-          path: smithay
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: web/ivnc/package-lock.json
-
-      - name: Build frontend
-        run: |
-          cd web/ivnc
-          npm ci
-          npm run build
-          mkdir -p dist
-          for f in ivnc-core.js ivnc-wr-core.js; do
-            if [ -f "$f" ]; then
-              cp -f "$f" dist/
-            fi
-          done
-          rm -rf dist/lib
-          cp -a lib dist/lib
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -63,18 +33,17 @@ jobs:
 
       - name: Build in Docker container
         run: |
-          # Create build script
-          cat > build.sh << 'BUILDSCRIPT'
+          cat > docker-build.sh << 'BUILDSCRIPT'
           #!/bin/bash
           set -e
 
-          # Install system dependencies
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential \
             pkg-config \
             curl \
             ca-certificates \
+            cmake \
             libx11-dev \
             libxcb1-dev \
             libxkbcommon-dev \
@@ -83,40 +52,34 @@ jobs:
             libgstreamer-plugins-base1.0-dev \
             libpulse-dev \
             libopus-dev \
-            cmake \
             libwayland-dev \
             libpixman-1-dev \
             libinput-dev \
             libudev-dev \
             libseat-dev
 
-          # Install Rust
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           source $HOME/.cargo/env
 
-          # Build release
           cd /workspace
-          cargo build --release --locked
 
-          # Copy binary to output
+          # Build frontend assets (plain JS copy)
+          bash build.sh --release
+
           cp target/release/ivnc /output/ivnc-linux-$ARCH
           BUILDSCRIPT
 
-          chmod +x build.sh
-
-          # Create output directory
+          chmod +x docker-build.sh
           mkdir -p output
 
-          # Run build in Docker container
           docker run --rm \
             --platform ${{ matrix.docker_platform }} \
             -v $(pwd):/workspace \
-            -v $(pwd)/smithay:/smithay \
             -v $(pwd)/output:/output \
-            -v $(pwd)/build.sh:/build.sh \
+            -v $(pwd)/docker-build.sh:/docker-build.sh \
             -e ARCH=${{ matrix.arch }} \
             ubuntu:22.04 \
-            /bin/bash /build.sh
+            /bin/bash /docker-build.sh
 
       - name: Verify binary
         run: |
@@ -144,14 +107,9 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir -p release-files
-
-          # WebRTC + GStreamer
           cp artifacts/ivnc-amd64/ivnc-linux-amd64 release-files/ || true
           # cp artifacts/ivnc-arm64/ivnc-linux-arm64 release-files/ || true
-
-          # Make executable
           chmod +x release-files/* || true
-
           echo "Release files:"
           ls -lh release-files/
 
@@ -197,8 +155,6 @@ jobs:
 
             ### 下载
 
-            #### 完整版 (WebRTC + GStreamer)
-
             需要系统安装 GStreamer 运行时库。
 
             | 架构 | 文件名 |
@@ -210,14 +166,12 @@ jobs:
             ### 快速安装
 
             ```bash
-            # AMD64 完整版
             wget https://github.com/${{ github.repository }}/releases/download/latest/ivnc-linux-amd64 -O ivnc
             chmod +x ivnc
             ```
 
             ### 运行时依赖
 
-            **完整版需要安装：**
             ```bash
             apt-get install libx11-6 libxcb1 \
               gstreamer1.0-tools gstreamer1.0-plugins-base \

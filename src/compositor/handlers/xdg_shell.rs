@@ -83,10 +83,13 @@ impl XdgShellHandler for Compositor {
         let focus_serial = smithay::utils::SERIAL_COUNTER.next_serial();
         keyboard.set_focus(self, Some(surface.wl_surface().clone()), focus_serial);
 
-        // Only update taskbar for the first (main) window, not dialogs/popups
-        if !is_dialog && self.window_registry.is_empty() {
-            self.window_registry.push(surface.wl_surface().clone());
-            self.taskbar_dirty = true;
+        // Register all non-dialog windows in the taskbar
+        if !is_dialog {
+            let wl = surface.wl_surface().clone();
+            if !self.window_registry.iter().any(|w| w.id() == wl.id()) {
+                self.window_registry.push(wl);
+                self.taskbar_dirty = true;
+            }
         }
     }
 

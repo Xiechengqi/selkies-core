@@ -67,6 +67,9 @@ pub struct SharedState {
     /// WebRTC session count
     pub webrtc_session_count: Arc<AtomicU64>,
 
+    /// Bumped each time a DataChannel opens (used to trigger taskbar resend)
+    pub datachannel_open_count: Arc<AtomicU64>,
+
     /// Runtime settings updated from client
     pub runtime_settings: Arc<RuntimeSettings>,
 
@@ -128,6 +131,7 @@ impl SharedState {
             start_time: std::time::Instant::now(),
             last_cursor_message: Arc::new(Mutex::new(None)),
             webrtc_session_count: Arc::new(AtomicU64::new(0)),
+            datachannel_open_count: Arc::new(AtomicU64::new(0)),
             runtime_settings,
             last_webrtc_stats_video: Arc::new(Mutex::new(None)),
             last_webrtc_stats_audio: Arc::new(Mutex::new(None)),
@@ -306,27 +310,12 @@ impl SharedState {
         stats.client_fps = fps;
     }
 
-    /// Record an ICE candidate by transport and type
-    pub fn record_ice_candidate(&self, transport: Option<&str>, candidate_type: Option<&str>) {
+    /// Record an ICE candidate (TCP-only keeps a minimal counter)
+    pub fn record_ice_candidate(&self, transport: Option<&str>) {
         let mut stats = self.stats.lock().unwrap();
         stats.ice_candidates_total += 1;
-
-        if let Some(transport) = transport {
-            match transport {
-                "udp" => stats.ice_candidates_udp += 1,
-                "tcp" => stats.ice_candidates_tcp += 1,
-                _ => {}
-            }
-        }
-
-        if let Some(candidate_type) = candidate_type {
-            match candidate_type {
-                "host" => stats.ice_candidates_host += 1,
-                "srflx" => stats.ice_candidates_srflx += 1,
-                "relay" => stats.ice_candidates_relay += 1,
-                "prflx" => stats.ice_candidates_prflx += 1,
-                _ => {}
-            }
+        if transport == Some("tcp") {
+            stats.ice_candidates_tcp += 1;
         }
     }
 
@@ -334,7 +323,7 @@ impl SharedState {
     pub fn stats_json(&self) -> String {
         let stats = self.stats.lock().unwrap().clone();
         format!(
-            r#"{{"fps":{:.2},"bandwidth":{},"latency":{},"client_latency":{},"client_fps":{},"clients":{},"cpu_percent":{:.1},"mem_used":{},"ice_candidates_total":{},"ice_candidates_udp":{},"ice_candidates_tcp":{},"ice_candidates_host":{},"ice_candidates_srflx":{},"ice_candidates_relay":{},"ice_candidates_prflx":{}}}"#,
+            r#"{{"fps":{:.2},"bandwidth":{},"latency":{},"client_latency":{},"client_fps":{},"clients":{},"cpu_percent":{:.1},"mem_used":{},"ice_candidates_total":{},"ice_candidates_tcp":{}}}"#,
             stats.fps,
             stats.bandwidth,
             stats.latency_ms,
@@ -344,12 +333,7 @@ impl SharedState {
             stats.cpu_percent,
             stats.mem_used,
             stats.ice_candidates_total,
-            stats.ice_candidates_udp,
-            stats.ice_candidates_tcp,
-            stats.ice_candidates_host,
-            stats.ice_candidates_srflx,
-            stats.ice_candidates_relay,
-            stats.ice_candidates_prflx
+            stats.ice_candidates_tcp
         )
     }
 
@@ -463,7 +447,7 @@ impl SharedState {
         let webrtc_sessions = self.webrtc_sessions();
 
         format!(
-            r#"{{"fps":{:.2},"bandwidth":{},"latency":{},"client_latency":{},"client_fps":{},"clients":{},"cpu_percent":{:.1},"mem_used":{},"webrtc_sessions":{},"ice_candidates_total":{},"ice_candidates_udp":{},"ice_candidates_tcp":{},"ice_candidates_host":{},"ice_candidates_srflx":{},"ice_candidates_relay":{},"ice_candidates_prflx":{}}}"#,
+            r#"{{"fps":{:.2},"bandwidth":{},"latency":{},"client_latency":{},"client_fps":{},"clients":{},"cpu_percent":{:.1},"mem_used":{},"webrtc_sessions":{},"ice_candidates_total":{},"ice_candidates_tcp":{}}}"#,
             stats.fps,
             stats.bandwidth,
             stats.latency_ms,
@@ -474,12 +458,7 @@ impl SharedState {
             stats.mem_used,
             webrtc_sessions,
             stats.ice_candidates_total,
-            stats.ice_candidates_udp,
-            stats.ice_candidates_tcp,
-            stats.ice_candidates_host,
-            stats.ice_candidates_srflx,
-            stats.ice_candidates_relay,
-            stats.ice_candidates_prflx
+            stats.ice_candidates_tcp
         )
     }
 }
@@ -497,12 +476,7 @@ pub struct RuntimeStats {
     pub cpu_percent: f64,
     pub mem_used: u64,
     pub ice_candidates_total: u64,
-    pub ice_candidates_udp: u64,
     pub ice_candidates_tcp: u64,
-    pub ice_candidates_host: u64,
-    pub ice_candidates_srflx: u64,
-    pub ice_candidates_relay: u64,
-    pub ice_candidates_prflx: u64,
 }
 
 impl Default for RuntimeStats {
@@ -518,12 +492,7 @@ impl Default for RuntimeStats {
             cpu_percent: 0.0,
             mem_used: 0,
             ice_candidates_total: 0,
-            ice_candidates_udp: 0,
             ice_candidates_tcp: 0,
-            ice_candidates_host: 0,
-            ice_candidates_srflx: 0,
-            ice_candidates_relay: 0,
-            ice_candidates_prflx: 0,
         }
     }
 }

@@ -307,7 +307,6 @@ export default function webrtc() {
 	let resizeRemote = false;
 	let scaleLocal = false;
 	let debug = false;
-	let turnSwitch = false;
 	let playButtonElement = null;
 	let statusDisplayElement = null;
 	let rtime = null;
@@ -1060,7 +1059,7 @@ export default function webrtc() {
 				if (connEl) {
 					var ct = stats.general.connectionType;
 					if (ct === 'relay') {
-						connEl.textContent = 'TURN';
+						connEl.textContent = 'RELAY';
 						connEl.style.color = '#f0a020';
 					} else if (ct === 'host') {
 						connEl.textContent = 'TCP';
@@ -1335,8 +1334,7 @@ export default function webrtc() {
 			appName = window.location.pathname.endsWith("/") && (window.location.pathname.split("/")[1]) || "webrtc";
 			debug = getBoolParam('debug', false);
 			setBoolParam('debug', debug);
-			turnSwitch = getBoolParam('turn_switch', false);
-			setBoolParam('turn_switch', turnSwitch);
+			// TCP-only: ignore legacy relay switch setting entirely.
 			resizeRemote = getBoolParam('resize_remote', resizeRemote);
 			setBoolParam('resize_remote', resizeRemote)
 			scaleLocal = getBoolParam('scaleLocallyManual', !resizeRemote);
@@ -1694,39 +1692,10 @@ export default function webrtc() {
 				});
 			}
 
-			// Fetch RTC configuration (ICE servers are optional with ICE-TCP).
-			// The server provides a TCP passive candidate in the SDP answer,
-			// so STUN/TURN are not required for connectivity.
-			fetch("./turn")
-				.then(function (response) {
-					return response.json();
-				})
-				.then((config) => {
-					// get initial local resolution
-					windowResolution = input.getWindowResolution();
-					signaling.currRes = windowResolution;
-
-					if (scaleLocal === false) {
-							webrtc.element.style.width = windowResolution[0]/window.devicePixelRatio+'px';
-							webrtc.element.style.height = windowResolution[1]/window.devicePixelRatio+'px';
-					}
-
-					// Apply ICE servers from server config if available
-					if (config.iceServers && config.iceServers.length > 0) {
-							webrtc.rtcPeerConfig.iceServers = config.iceServers;
-							debugEntries.push(applyTimestamp("ICE servers configured: " + config.iceServers.length));
-					} else {
-							debugEntries.push(applyTimestamp("No external ICE servers, using ICE-TCP only."));
-					}
-					webrtc.connect();
-				})
-				.catch(() => {
-					// If /turn fetch fails, connect anyway — ICE-TCP doesn't need STUN/TURN
-					windowResolution = input.getWindowResolution();
-					signaling.currRes = windowResolution;
-					debugEntries.push(applyTimestamp("ICE config fetch failed, using ICE-TCP only."));
-					webrtc.connect();
-				});
+			// TCP-only: directly connect using the SDP answer's TCP candidate.
+			windowResolution = input.getWindowResolution();
+			signaling.currRes = windowResolution;
+			webrtc.connect();
 		},
 		cleanup() {
 			// reset the data
@@ -1776,7 +1745,6 @@ export default function webrtc() {
 			resizeRemote = false;
 			scaleLocal = false;
 			debug = false;
-			turnSwitch = false;
 			playButtonElement = null;
 			statusDisplayElement = null;
 			rtime = null;

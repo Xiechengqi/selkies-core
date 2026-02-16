@@ -1,57 +1,57 @@
-# Selkies 协议规范
+# iVnc 协议规范
 
 ## 1. 概述
 
-本文档定义了 selkies-core 与浏览器客户端之间的通信协议。selkies-core 支持两种传输模式：
+本文档定义了 iVnc 服务端与浏览器客户端之间的通信协议。iVnc 使用 WebRTC 进行低延迟视频/音频流传输，通过 DataChannel 传输输入事件和控制消息。
 
-1. **WebRTC 模式（默认）** - 使用 WebRTC 进行低延迟视频流传输，通过 DataChannel 传输输入事件
-2. **WebSocket 模式（备用）** - 使用 WebSocket 传输 JPEG 条纹和输入事件
-
-两种模式的输入协议格式兼容，便于客户端在不同模式间切换。
+传输层基于 str0m Sans-I/O WebRTC 库，所有媒体和数据通道均通过 ICE-TCP 传输（RFC 4571 帧格式），HTTP/WebSocket 信令/ICE-TCP 共享同一端口。
 
 ## 2. 连接建立
 
-### 2.1 WebRTC 模式
-
-#### 2.1.1 信令端点
+### 2.1 信令端点
 
 ```
-ws://{host}:{http_port}/webrtc
-wss://{host}:{http_port}/webrtc  (TLS)
+ws://{host}:{port}/webrtc
+wss://{host}:{port}/webrtc  (TLS)
 ```
 
-默认 HTTP 端口：8000
+默认端口：8008
 
-#### 2.1.2 连接流程
-
-1. 客户端连接到 WebRTC 信令 WebSocket
-2. 客户端发送 SDP Offer
-3. 服务端返回 SDP Answer
-4. 交换 ICE Candidates
-5. 建立 WebRTC PeerConnection
-6. 接收视频轨道（RTP）
-7. 打开 DataChannel 用于输入事件
-
-### 2.2 WebSocket 模式（备用）
-
-#### 2.2.1 WebSocket 端点
+### 2.2 连接流程
 
 ```
-ws://{host}:{ws_port}/
-wss://{host}:{ws_port}/  (TLS)
+Client                                          Server
+   │                                               │
+   │─────────── HTTP GET /webrtc ──────────────────▶│
+   │◀────────── WebSocket Upgrade ─────────────────│
+   │                                               │
+   │─────────── SDP Offer (JSON) ──────────────────▶│
+   │                                               │
+   │◀────────── SDP Answer (JSON) ─────────────────│
+   │                                               │
+   │═══════════ ICE-TCP 连接 (同端口) ═════════════│
+   │                                               │
+   │◀────────── DTLS/SRTP 握手 ────────────────────│
+   │                                               │
+   │◀══════════ Video RTP (H.264/VP8) ═════════════│
+   │◀══════════ Audio RTP (Opus) ══════════════════│
+   │◄─────────► DataChannel (SCTP/DTLS) ──────────►│
+   │                                               │
 ```
 
-默认 WebSocket 端口：8080
+1. 客户端通过 WebSocket 连接到 `/webrtc` 信令端点
+2. 客户端发送 SDP Offer（包含 ICE-TCP candidate）
+3. 服务端返回 SDP Answer（包含 ICE-lite TCP passive candidate）
+4. 浏览器通过同端口建立 ICE-TCP 连接
+5. DTLS/SRTP 握手完成后，开始接收视频和音频 RTP 流
+6. DataChannel 打开后，用于双向输入事件和控制消息
 
-### 2.2 连接握手
+### 2.3 同端口复用
 
-客户端连接后，服务端会立即发送初始化消息：
+HTTP、WebSocket 信令和 ICE-TCP 共享同一端口（默认 8008）。服务端通过 TCP 连接的首字节自动区分协议类型：
 
-```
-system,resolution,{width}x{height}
-system,framerate,{fps}
-system,encoder,jpeg
-```
+- HTTP 方法首字母（`G`/`P`/`H`/`D`/`O`/`C`）→ Axum HTTP 路由
+- 其他字节 → ICE-TCP 数据包 → SessionManager
 
 ## 3. WebRTC 信令协议
 
@@ -66,8 +66,7 @@ WebRTC 信令使用 JSON 格式通过 WebSocket 传输。
 ```json
 {
   "type": "offer",
-  "sdp": "v=0\r\no=- ...",
-  "session_id": "optional-session-id"
+  "sdp": "v=0\r\no=- ..."
 }
 ```
 
@@ -79,101 +78,29 @@ WebRTC 信令使用 JSON 格式通过 WebSocket 传输。
 {
   "type": "answer",
   "sdp": "v=0\r\no=- ...",
-  "session_id": "session-123"
+  "session_id": "session-abc123"
 }
 ```
 
-#### 3.1.3 ICE Candidate 消息
+SDP Answer 中包含 ICE-lite TCP passive candidate，指向同一端口。
 
-交换 ICE Candidates：
-
-```json
-{
-  "type": "ice_candidate",
-  "candidate": "candidate:...",
-  "sdp_mid": "0",
-  "sdp_mline_index": 0,
-  "session_id": "session-123"
-}
-```
-
-### 3.2 DataChannel 输入协议
-
-输入事件通过 WebRTC DataChannel 传输，格式与 WebSocket 模式兼容。
-
-## 4. WebSocket 消息格式
+## 4. DataChannel 消息格式
 
 ### 4.1 通用格式
 
-所有消息均为 UTF-8 文本，使用逗号 `,` 分隔字段：
+所有 DataChannel 文本消息均为 UTF-8，使用逗号 `,` 分隔字段：
 
 ```
 {message_type},{field1},{field2},...
 ```
 
-### 4.2 二进制数据编码
+二进制消息用于文件上传。
 
-二进制数据（如 JPEG、Opus）使用 Base64 编码传输。
+## 5. 服务端消息 (Server → Client via DataChannel)
 
-## 5. 服务端消息 (Server → Client)
+### 5.1 光标消息 `cursor`
 
-### 5.1 视频条纹消息 `s` (WebSocket 模式)
-
-传输 JPEG 编码的屏幕条纹。
-
-**格式:**
-```
-s,{y},{height},{base64_jpeg_data}
-```
-
-**字段:**
-| 字段 | 类型 | 描述 |
-|------|------|------|
-| y | u32 | 条纹起始 Y 坐标 (像素) |
-| height | u32 | 条纹高度 (像素) |
-| base64_jpeg_data | string | Base64 编码的 JPEG 图像 |
-
-**示例:**
-```
-s,0,64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQ...
-s,64,64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJ...
-s,128,64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwc...
-```
-
-**客户端处理:**
-```javascript
-const [type, y, height, jpegData] = message.split(',');
-if (type === 's') {
-    const img = new Image();
-    img.onload = () => {
-        ctx.drawImage(img, 0, parseInt(y), canvas.width, parseInt(height));
-    };
-    img.src = 'data:image/jpeg;base64,' + jpegData;
-}
-```
-
-### 4.2 音频消息 `a`
-
-传输 Opus 编码的音频数据。
-
-**格式:**
-```
-a,{base64_opus_data}
-```
-
-**字段:**
-| 字段 | 类型 | 描述 |
-|------|------|------|
-| base64_opus_data | string | Base64 编码的 Opus 音频帧 |
-
-**示例:**
-```
-a,T3B1c0hlYWQBATgBgLsAAAAAAA...
-```
-
-### 4.3 光标消息 `cursor`
-
-传输鼠标光标信息。
+传输鼠标光标状态变化。
 
 **格式:**
 ```
@@ -183,35 +110,25 @@ cursor,{json_data}
 **JSON 结构:**
 ```json
 {
-    "x": 100,
-    "y": 200,
-    "visible": true,
-    "image": "base64_png_data",  // 可选，自定义光标
-    "hotspot_x": 0,              // 可选
-    "hotspot_y": 0               // 可选
+    "override": "default"
 }
 ```
 
+`override` 值为 CSS cursor 名称：`default`, `pointer`, `text`, `move`, `none` 等。
+
 **示例:**
 ```
-cursor,{"x":512,"y":384,"visible":true}
+cursor,{"override":"text"}
+cursor,{"override":"none"}
 ```
 
-### 4.4 剪贴板消息 `clipboard`
+### 5.2 剪贴板消息 `clipboard`
 
-传输剪贴板内容。
+传输远程应用的剪贴板内容到浏览器。
 
-**格式 (文本):**
+**格式:**
 ```
 clipboard,{base64_text_data}
-```
-
-**格式 (大数据分块):**
-```
-clipboard_start,{mime_type},{total_size}
-clipboard_data,{base64_chunk}
-clipboard_data,{base64_chunk}
-clipboard_finish
 ```
 
 **示例:**
@@ -219,39 +136,40 @@ clipboard_finish
 clipboard,SGVsbG8gV29ybGQh
 ```
 
-### 4.5 系统消息 `system`
+### 5.3 任务栏消息 `taskbar`
 
-传输系统状态和控制信息。
+传输窗口列表信息。
 
 **格式:**
 ```
-system,{action},{data}
+taskbar,{json_data}
 ```
 
-**动作类型:**
-
-| 动作 | 数据格式 | 描述 |
-|------|----------|------|
-| resolution | `{width}x{height}` | 屏幕分辨率 |
-| framerate | `{fps}` | 当前帧率 |
-| encoder | `{encoder_name}` | 编码器名称 |
-| bitrate | `{kbps}` | 当前比特率 |
-| latency | `{ms}` | 往返延迟 |
-| ui_config | `{json}` | UI 配置 |
-| reload | (无) | 请求客户端刷新 |
-
-**示例:**
+**JSON 结构:**
+```json
+{
+    "windows": [
+        {
+            "id": 0,
+            "title": "Terminal",
+            "app_id": "org.gnome.Terminal",
+            "display_name": "Terminal",
+            "focused": true
+        },
+        {
+            "id": 1,
+            "title": "Files",
+            "app_id": "org.gnome.Nautilus",
+            "display_name": "Files",
+            "focused": false
+        }
+    ]
+}
 ```
-system,resolution,1920x1080
-system,framerate,30
-system,encoder,jpeg
-system,reload
-system,ui_config,{"version":"1",...}
-```
 
-### 4.6 统计消息 `stats`
+### 5.4 统计消息 `stats`
 
-传输性能统计信息。
+传输性能统计信息（每秒发送一次）。
 
 **格式:**
 ```
@@ -263,34 +181,36 @@ stats,{json_data}
 {
     "fps": 30.0,
     "bandwidth": 2500000,
-    "latency": 15,
-    "clients": 1,
-    "cpu_percent": 5.2,
-    "mem_used": 45000000
+    "total_frames": 1800,
+    "total_bytes": 45000000
 }
 ```
 
-### 4.7 Ping 消息 `ping`
+### 5.5 Ping 消息
 
-用于测量往返延迟。
-
-**格式:**
-```
-ping,{timestamp}
-```
-
-**示例:**
-```
-ping,1705500000.123
-```
-
-## 5. 客户端消息 (Client → Server)
-
-### 5.1 鼠标移动 `m`
+服务端定期发送 keepalive。
 
 **格式:**
 ```
-m,{x},{y}
+ping
+```
+
+### 5.6 Pong 消息
+
+响应客户端的 ping。
+
+**格式:**
+```
+pong
+```
+
+## 6. 客户端消息 (Client → Server via DataChannel)
+
+### 6.1 鼠标移动 `m`
+
+**格式:**
+```
+m,{x},{y},{buttonMask},{unused}
 ```
 
 **字段:**
@@ -298,14 +218,20 @@ m,{x},{y}
 |------|------|------|
 | x | i32 | X 坐标 (像素) |
 | y | i32 | Y 坐标 (像素) |
+| buttonMask | u32 | 按键位掩码 (bit0=左, bit1=中, bit2=右) |
+| unused | i32 | 保留字段 |
+
+buttonMask 变化时自动合成按键按下/释放事件。
 
 **示例:**
 ```
-m,512,384
-m,1024,768
+m,512,384,0,0
+m,512,384,1,0    # 左键按下（buttonMask bit0 = 1）
+m,600,400,1,0    # 拖拽中
+m,600,400,0,0    # 左键释放
 ```
 
-### 5.2 鼠标按键 `b`
+### 6.2 鼠标按键 `b`
 
 **格式:**
 ```
@@ -315,17 +241,16 @@ b,{button},{pressed}
 **字段:**
 | 字段 | 类型 | 描述 |
 |------|------|------|
-| button | u8 | 按键编号 (1=左, 2=中, 3=右) |
+| button | u8 | 按键编号 (0=左, 1=中, 2=右) |
 | pressed | u8 | 状态 (0=释放, 1=按下) |
 
 **示例:**
 ```
-b,1,1    # 左键按下
-b,1,0    # 左键释放
-b,3,1    # 右键按下
+b,0,1    # 左键按下
+b,0,0    # 左键释放
 ```
 
-### 5.3 鼠标滚轮 `w`
+### 6.3 鼠标滚轮 `w`
 
 **格式:**
 ```
@@ -342,10 +267,9 @@ w,{dx},{dy}
 ```
 w,0,-120   # 向上滚动
 w,0,120    # 向下滚动
-w,-120,0   # 向左滚动
 ```
 
-### 5.4 键盘事件 `k`
+### 6.4 键盘事件 `k`
 
 **格式:**
 ```
@@ -358,242 +282,240 @@ k,{keysym},{pressed}
 | keysym | u32 | X11 KeySym 值 |
 | pressed | u8 | 状态 (0=释放, 1=按下) |
 
+服务端将 X11 keysym 转换为 xkb keycode（evdev + 8）注入 Wayland 合成器。
+
 **常用 KeySym 值:**
-| 键 | KeySym (十进制) | KeySym (十六进制) |
-|----|-----------------|-------------------|
-| A-Z | 65-90 | 0x41-0x5A |
-| a-z | 97-122 | 0x61-0x7A |
-| 0-9 | 48-57 | 0x30-0x39 |
-| Space | 32 | 0x20 |
-| Enter | 65293 | 0xFF0D |
-| Backspace | 65288 | 0xFF08 |
-| Tab | 65289 | 0xFF09 |
-| Escape | 65307 | 0xFF1B |
-| Shift_L | 65505 | 0xFFE1 |
-| Control_L | 65507 | 0xFFE3 |
-| Alt_L | 65513 | 0xFFE9 |
-| F1-F12 | 65470-65481 | 0xFFBE-0xFFC9 |
-| Left | 65361 | 0xFF51 |
-| Up | 65362 | 0xFF52 |
-| Right | 65363 | 0xFF53 |
-| Down | 65364 | 0xFF54 |
+| 键 | KeySym (十六进制) |
+|----|-------------------|
+| a-z | 0x61-0x7A |
+| A-Z | 0x41-0x5A |
+| 0-9 | 0x30-0x39 |
+| Space | 0x20 |
+| Enter | 0xFF0D |
+| Backspace | 0xFF08 |
+| Tab | 0xFF09 |
+| Escape | 0xFF1B |
+| Shift_L/R | 0xFFE1/0xFFE2 |
+| Control_L/R | 0xFFE3/0xFFE4 |
+| Alt_L/R | 0xFFE9/0xFFEA |
+| Super_L/R | 0xFFEB/0xFFEC |
+| F1-F12 | 0xFFBE-0xFFC9 |
+| Arrows | 0xFF51-0xFF54 |
 
 **示例:**
 ```
-k,65,1     # 'A' 按下
-k,65,0     # 'A' 释放
+k,97,1     # 'a' 按下
+k,97,0     # 'a' 释放
 k,65507,1  # Ctrl 按下
-k,65,1     # 'A' 按下 (Ctrl+A)
-k,65,0     # 'A' 释放
+k,97,1     # 'a' 按下 (Ctrl+A)
+k,97,0     # 'a' 释放
 k,65507,0  # Ctrl 释放
 ```
 
-### 5.5 剪贴板 `c`
+### 6.5 文本输入 `t`
+
+通过 IME 提交的文本，使用 zwp_text_input_v3 协议注入。
 
 **格式:**
 ```
-c,{base64_text_data}
+t,{text}
 ```
 
 **示例:**
 ```
-c,SGVsbG8gV29ybGQh
+t,你好世界
 ```
 
-### 5.6 Pong 响应 `pong`
+### 6.6 剪贴板 `cw`
+
+浏览器剪贴板内容发送到远程应用。
+
+**格式:**
+```
+cw,{base64_text_data}
+```
+
+**示例:**
+```
+cw,SGVsbG8gV29ybGQh
+```
+
+### 6.7 分辨率调整 `r`
+
+**格式:**
+```
+r,{width}x{height}
+```
+
+**示例:**
+```
+r,1920x1080
+r,1280x720
+```
+
+### 6.8 键盘重置 `kr`
+
+释放所有修饰键（Shift/Ctrl/Alt/Super），清除粘滞状态。
+
+**格式:**
+```
+kr
+```
+
+### 6.9 窗口焦点 `focus`
+
+切换焦点到指定窗口。
+
+**格式:**
+```
+focus,{window_id}
+```
+
+### 6.10 窗口关闭 `close`
+
+关闭指定窗口。
+
+**格式:**
+```
+close,{window_id}
+```
+
+### 6.11 Pong 响应 `pong`
 
 响应服务端的 ping 消息。
 
 **格式:**
 ```
-pong,{timestamp}
+pong
 ```
 
-**示例:**
-```
-pong,1705500000.123
-```
+### 6.12 运行时设置 `SETTINGS`
 
-### 5.7 控制命令 `_r`
-
-发送控制命令。
+动态调整服务端参数。
 
 **格式:**
 ```
-_r,{action}
+SETTINGS,{json_data}
 ```
 
-**动作类型:**
-| 动作 | 描述 |
-|------|------|
-| cycleDecoder | 切换解码器 |
-| toggleKeyboard | 切换虚拟键盘 |
-| requestFullRefresh | 请求全帧刷新 |
-| requestStats | 请求统计信息 |
+### 6.13 客户端统计
 
-**示例:**
+**格式:**
 ```
-_r,requestFullRefresh
-_r,requestStats
+_f,{fps}                    # 客户端渲染帧率
+_l,{latency_ms}             # 客户端延迟
+_arg_fps,{fps}              # 请求目标帧率
+_stats_video,{json}         # WebRTC 视频统计
+_stats_audio,{json}         # WebRTC 音频统计
 ```
 
-## 6. 消息序列图
+## 7. 消息序列图
 
-### 6.1 正常会话流程
+### 7.1 正常会话流程
 
 ```
 Client                                          Server
    │                                               │
-   │─────────── WebSocket Connect ────────────────▶│
+   │─────────── WS: SDP Offer ─────────────────────▶│
+   │◀────────── WS: SDP Answer ────────────────────│
    │                                               │
-   │◀────────── system,resolution,1920x1080 ──────│
-   │◀────────── system,framerate,30 ──────────────│
-   │◀────────── system,encoder,jpeg ──────────────│
+   │═══════════ ICE-TCP + DTLS 握手 ═══════════════│
    │                                               │
-   │                 [视频流开始]                   │
-   │◀────────── s,0,64,{jpeg} ────────────────────│
-   │◀────────── s,64,64,{jpeg} ───────────────────│
-   │◀────────── s,128,64,{jpeg} ──────────────────│
-   │             ...                               │
+   │◀══════════ Video RTP (H.264) ═════════════════│
+   │◀══════════ Audio RTP (Opus) ══════════════════│
    │                                               │
-   │                 [用户输入]                     │
-   │─────────── m,512,384 ────────────────────────▶│
+   │◄──────────► DataChannel Open ─────────────────│
    │                                               │
-   │◀────────── cursor,{"x":512,"y":384} ─────────│
+   │◀────────── taskbar,{"windows":[...]} ─────────│
+   │◀────────── cursor,{"override":"default"} ─────│
    │                                               │
-   │─────────── b,1,1 ────────────────────────────▶│  (点击)
-   │─────────── b,1,0 ────────────────────────────▶│
+   │                 [用户输入]                      │
+   │─────────── m,512,384,0,0 ─────────────────────▶│
+   │─────────── k,97,1 ────────────────────────────▶│
+   │─────────── k,97,0 ────────────────────────────▶│
    │                                               │
-   │─────────── k,65,1 ───────────────────────────▶│  (按键 'A')
-   │─────────── k,65,0 ───────────────────────────▶│
+   │                 [心跳保活]                      │
+   │◀────────── ping ──────────────────────────────│
+   │─────────── pong ──────────────────────────────▶│
    │                                               │
-   │                 [延迟测量]                     │
-   │◀────────── ping,1705500000.123 ──────────────│
-   │─────────── pong,1705500000.123 ──────────────▶│
-   │◀────────── system,latency,15 ────────────────│
-   │                                               │
-   │─────────── WebSocket Close ──────────────────▶│
+   │◀────────── stats,{...} ───────────────────────│
    │                                               │
 ```
 
-### 6.2 剪贴板同步流程
+### 7.2 剪贴板同步流程
 
 ```
 Client                                          Server
    │                                               │
-   │                 [服务端复制]                   │
-   │◀────────── clipboard,SGVsbG8... ─────────────│
+   │           [远程应用复制]                        │
    │                                               │
-   │                 [客户端粘贴]                   │
-   │─────────── c,V29ybGQh... ────────────────────▶│
+   │           Wayland client → new_selection()     │
+   │           → clipboard_pending_mime (延迟)      │
+   │           → request_data_device_client_selection│
+   │           → 非阻塞 pipe 读取                   │
    │                                               │
-   │                 [大文件分块]                   │
-   │◀────────── clipboard_start,text/plain,10000 ─│
-   │◀────────── clipboard_data,{chunk1} ──────────│
-   │◀────────── clipboard_data,{chunk2} ──────────│
-   │◀────────── clipboard_data,{chunk3} ──────────│
-   │◀────────── clipboard_finish ─────────────────│
+   │◀────────── clipboard,SGVsbG8... ──────────────│
+   │                                               │
+   │           [浏览器粘贴到远程]                    │
+   │                                               │
+   │─────────── cw,V29ybGQh... ───────────────────▶│
+   │                                               │
+   │           → set_data_device_selection()        │
+   │           → clipboard_suppress_until (500ms)   │
+   │           → Wayland client reads via           │
+   │             send_selection()                   │
    │                                               │
 ```
 
-## 7. 错误处理
+### 7.3 窗口管理流程
 
-### 7.1 协议错误
-
-当收到无效消息时，服务端会记录日志但不会断开连接：
-
-```rust
-// 服务端处理
-match parse_message(&msg) {
-    Ok(event) => handle_event(event),
-    Err(e) => {
-        tracing::warn!("Invalid message: {}", e);
-        // 继续处理后续消息
-    }
-}
+```
+Client                                          Server
+   │                                               │
+   │           [新窗口打开]                         │
+   │◀────────── taskbar,{"windows":[...]} ─────────│
+   │                                               │
+   │           [切换窗口焦点]                       │
+   │─────────── focus,1 ───────────────────────────▶│
+   │◀────────── taskbar,{"windows":[...]} ─────────│
+   │                                               │
+   │           [关闭窗口]                           │
+   │─────────── close,0 ───────────────────────────▶│
+   │◀────────── taskbar,{"windows":[...]} ─────────│
+   │                                               │
 ```
 
-### 7.2 连接断开
+## 8. 错误处理
 
-客户端应实现自动重连机制：
+### 8.1 协议错误
 
-```javascript
-function connect() {
-    const ws = new WebSocket(url);
+当收到无效 DataChannel 消息时，服务端记录日志但不断开连接：
 
-    ws.onclose = () => {
-        setTimeout(connect, 1000); // 1秒后重连
-    };
-
-    ws.onerror = (err) => {
-        console.error('WebSocket error:', err);
-        ws.close();
-    };
-}
+```
+debug!("Session {} DC parse error: {}", session.id, e);
 ```
 
-## 8. 性能建议
+### 8.2 连接断开
 
-### 8.1 消息合并
+- 服务端通过 ping/pong 机制检测连接活性（15 秒间隔，45 秒超时）
+- TCP 连接关闭时自动清理会话
+- 客户端应实现自动重连机制
 
-客户端应合并高频输入事件：
+## 9. HTTP 端点
 
-```javascript
-let pendingMouseMove = null;
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/` | GET | Web 界面（嵌入式前端资源） |
+| `/webrtc` | GET (WS) | WebRTC 信令 WebSocket |
+| `/health` | GET | 健康检查（JSON） |
+| `/metrics` | GET | Prometheus 指标 |
+| `/clients` | GET | 活跃连接列表 |
+| `/ui-config` | GET | UI 配置 |
+| `/ws-config` | GET | WebSocket 端口配置 |
 
-document.addEventListener('mousemove', (e) => {
-    pendingMouseMove = { x: e.clientX, y: e.clientY };
-});
-
-setInterval(() => {
-    if (pendingMouseMove) {
-        ws.send(`m,${pendingMouseMove.x},${pendingMouseMove.y}`);
-        pendingMouseMove = null;
-    }
-}, 16); // ~60Hz
-```
-
-### 8.2 背压处理
-
-当网络拥塞时，服务端会降低帧率：
-
-```rust
-if send_buffer.len() > MAX_BUFFER_SIZE {
-    // 跳过当前帧
-    frame_rate_controller.skip_frame();
-}
-```
-
-## 9. 安全考虑
-
-### 9.1 输入验证
-
-服务端必须验证所有输入坐标：
-
-```rust
-fn validate_mouse_coords(x: i32, y: i32, width: u32, height: u32) -> bool {
-    x >= 0 && y >= 0 && x < width as i32 && y < height as i32
-}
-```
-
-### 9.2 KeySym 过滤
-
-可选择过滤危险的快捷键：
-
-```rust
-const BLOCKED_KEYSYMS: &[u32] = &[
-    0xFFEB, // Super_L (可能触发系统快捷键)
-    0xFFEC, // Super_R
-];
-```
-
-## 10. 版本兼容性
-
-| 协议版本 | selkies-core 版本 | 变更 |
-|----------|-------------------|------|
-| 1.0 | 0.1.x | 初始版本 |
+所有 HTTP 端点支持 Basic Auth（可配置）。
 
 ---
 
-*文档版本: 1.0*
-*最后更新: 2026-01-17*
+*文档版本: 2.0*
+*最后更新: 2026-02-16*

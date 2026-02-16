@@ -17,7 +17,8 @@ use crate::web::SharedState;
 use log::{debug, error, info, warn};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
@@ -41,6 +42,8 @@ pub struct RtcSession {
     pub audio_mid: Option<Mid>,
     /// DataChannel ID for input
     pub dc_id: Option<ChannelId>,
+    /// Negotiated video payload type (discovered from SDP, e.g. H264 PT)
+    video_pt: Option<Pt>,
     /// Negotiated audio payload type (discovered from SDP)
     audio_pt: Option<Pt>,
     /// Whether the session is connected
@@ -66,6 +69,7 @@ impl RtcSession {
             video_mid: None,
             audio_mid: None,
             dc_id: None,
+            video_pt: None,
             audio_pt: None,
             connected: false,
             video_seq: 0,
@@ -109,7 +113,13 @@ impl RtcSession {
             return Ok(()); // Too small
         }
 
-        let pt = rtp_util::get_payload_type(rtp_data).unwrap_or(96);
+        // Use the negotiated PT from SDP, not the GStreamer-assigned one.
+        // GStreamer uses PT 96 by default for H.264, but str0m may have
+        // mapped PT 96 to VP8 — we must use the actual H.264 PT from SDP.
+        let pt = match self.video_pt {
+            Some(pt) => pt,
+            None => Pt::new_with_value(rtp_util::get_payload_type(rtp_data).unwrap_or(96)),
+        };
         let marker = rtp_util::is_marker_set(rtp_data);
         let timestamp = rtp_util::get_timestamp(rtp_data).unwrap_or(0);
         let header_len = rtp_util::header_length(rtp_data).unwrap_or(12);
@@ -124,7 +134,7 @@ impl RtcSession {
 
         if let Some(stream_tx) = self.rtc.direct_api().stream_tx_by_mid(mid, None) {
             let _ = stream_tx.write_rtp(
-                Pt::new_with_value(pt),
+                pt,
                 seq,
                 timestamp,
                 Instant::now(),
@@ -133,6 +143,10 @@ impl RtcSession {
                 true, // nackable
                 payload,
             );
+            if self.video_seq <= 5 {
+                info!("Session {} write_rtp seq={} pt={:?} ts={} marker={} len={}",
+                    self.id, self.video_seq - 1, pt, timestamp, marker, rtp_data.len());
+            }
         }
 
         Ok(())
@@ -190,6 +204,7 @@ impl RtcSession {
 /// - Audio broadcast → str0m write_rtp (audio)
 /// - Text broadcast → DataChannel write
 /// - DataChannel events → input_tx
+
 pub async fn drive_session(
     mut session: RtcSession,
     mut tcp_stream: TcpStream,
@@ -204,12 +219,19 @@ pub async fn drive_session(
     let session_id = session.id.clone();
     info!("Session {} drive loop started (peer: {})", session_id, peer_addr);
 
+    // Disable Nagle's algorithm for low-latency RTP delivery
+    if let Err(e) = tcp_stream.set_nodelay(true) {
+        warn!("Session {} failed to set TCP_NODELAY: {}", session_id, e);
+    }
+
+    let last_pong = Arc::new(AtomicU64::new(now_millis()));
     let ctx = EventContext {
         input_tx: &input_tx,
         upload_handler: &upload_handler,
         clipboard: &clipboard,
         runtime_settings: &runtime_settings,
         shared_state: &shared_state,
+        last_pong: &last_pong,
     };
 
     let mut decoder = TcpFrameDecoder::new();
@@ -225,6 +247,10 @@ pub async fn drive_session(
     // Stats counters
     let mut rtp_fwd_count: u64 = 0;
     let mut audio_fwd_count: u64 = 0;
+
+    // Keepalive settings
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(15));
+    let pong_timeout = Duration::from_secs(45);
 
     // Initial timeout — will be set by drain_outputs
     let mut next_timeout;
@@ -252,23 +278,33 @@ pub async fn drive_session(
                     }
                     Ok(n) => {
                         decoder.extend(&buf[..n]);
-                        while let Some(pkt) = decoder.next_packet() {
-                            let recv = net::Receive {
-                                proto: Protocol::Tcp,
-                                source: peer_addr,
-                                destination: local_addr,
-                                contents: match (&*pkt).try_into() {
-                                    Ok(c) => c,
-                                    Err(e) => {
-                                        debug!("Session {} packet parse error: {}", session_id, e);
-                                        continue;
+                        loop {
+                            match decoder.next_packet() {
+                                Ok(Some(pkt)) => {
+                                    let recv = net::Receive {
+                                        proto: Protocol::Tcp,
+                                        source: peer_addr,
+                                        destination: local_addr,
+                                        contents: match (&*pkt).try_into() {
+                                            Ok(c) => c,
+                                            Err(e) => {
+                                                debug!("Session {} packet parse error: {}", session_id, e);
+                                                continue;
+                                            }
+                                        },
+                                    };
+                                    if let Err(e) = session.rtc.handle_input(Input::Receive(Instant::now(), recv)) {
+                                        warn!("Session {} handle_input error: {}", session_id, e);
+                                        fatal = true;
+                                        break;
                                     }
-                                },
-                            };
-                            if let Err(e) = session.rtc.handle_input(Input::Receive(Instant::now(), recv)) {
-                                warn!("Session {} handle_input error: {}", session_id, e);
-                                fatal = true;
-                                break;
+                                }
+                                Ok(None) => break,
+                                Err(e) => {
+                                    warn!("Session {} invalid RFC 4571 frame: {:?}", session_id, e);
+                                    fatal = true;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -292,12 +328,32 @@ pub async fn drive_session(
                 match result {
                     Ok(pkt) => {
                         if session.connected {
-                            rtp_fwd_count += 1;
-                            if rtp_fwd_count <= 5 || rtp_fwd_count % 2000 == 0 {
-                                info!("Session {} fwd video RTP #{}: {} bytes",
-                                    session_id, rtp_fwd_count, pkt.len());
+                            // Collect this packet + all buffered packets
+                            let mut rtp_batch = vec![pkt];
+                            while let Ok(pkt) = rtp_rx.try_recv() {
+                                rtp_batch.push(pkt);
                             }
-                            let _ = session.write_video_rtp(&pkt);
+                            rtp_fwd_count += rtp_batch.len() as u64;
+                            if rtp_fwd_count <= 3 {
+                                info!("Session {} fwd video RTP batch: {} pkts (total {})",
+                                    session_id, rtp_batch.len(), rtp_fwd_count);
+                            }
+                            // Write each packet individually with its own
+                            // handle_timeout + drain cycle.  str0m's NullPacer
+                            // emits at most one packet per timeout→poll cycle,
+                            // so we must interleave writes and drains.
+                            for pkt in rtp_batch {
+                                let _ = session.write_video_rtp(&pkt);
+                                let _ = session.rtc.handle_input(Input::Timeout(Instant::now()));
+                                match drain_outputs_fast(&mut session, &mut tcp_stream, &ctx).await {
+                                    Ok(()) => {}
+                                    Err(e) => {
+                                        warn!("Session {} RTP drain error: {}", session_id, e);
+                                        fatal = true;
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -322,6 +378,16 @@ pub async fn drive_session(
                             }
                             let _ = session.write_audio_rtp(&pkt.data, audio_timestamp);
                             audio_timestamp = audio_timestamp.wrapping_add(samples_per_frame);
+                            // Interleaved drain like video — NullPacer needs
+                            // handle_timeout + poll per packet.
+                            let _ = session.rtc.handle_input(Input::Timeout(Instant::now()));
+                            match drain_outputs_fast(&mut session, &mut tcp_stream, &ctx).await {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    warn!("Session {} audio drain error: {}", session_id, e);
+                                    fatal = true;
+                                }
+                            }
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -343,12 +409,32 @@ pub async fn drive_session(
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
+
+            // Keepalive ping
+            _ = ping_interval.tick() => {
+                if session.connected {
+                    let _ = session.send_datachannel_text("ping");
+                }
+            }
         }
 
         // After any event, drain str0m outputs
         if fatal {
             break;
         }
+        if session.connected {
+            let last = last_pong.load(Ordering::Relaxed);
+            let now = now_millis();
+            if now.saturating_sub(last) > pong_timeout.as_millis() as u64 {
+                warn!("Session {} pong timeout; closing connection", session_id);
+                break;
+            }
+        }
+        // str0m Sans-I/O requires a Timeout input to timestamp queued RTP
+        // packets so the pacer can emit them.  Without this, write_rtp()
+        // packets sit in the send queue with a sentinel timestamp and are
+        // never transmitted.
+        let _ = session.rtc.handle_input(Input::Timeout(Instant::now()));
         match drain_outputs(&mut session, &mut tcp_stream, &ctx).await {
             Ok(t) => next_timeout = t,
             Err(e) => {
@@ -363,13 +449,71 @@ pub async fn drive_session(
 }
 
 /// Drain all pending str0m outputs: transmit packets, handle events, get next timeout.
+///
+/// str0m's NullPacer emits one RTP packet per handle_timeout→poll_output cycle.
+/// We loop: poll_output until Timeout, then re-trigger handle_input(Timeout) to
+/// refresh the pacer's queue state, and poll again.  We stop when a cycle
+/// produces no Transmit outputs (only Timeout).
 async fn drain_outputs(
     session: &mut RtcSession,
     tcp_stream: &mut TcpStream,
     ctx: &EventContext<'_>,
 ) -> Result<Instant, WebRTCError> {
-    let next_timeout;
+    let mut next_timeout;
+    let mut cycles = 0u32;
+    const MAX_DRAIN_CYCLES: u32 = 512;
 
+    loop {
+        let mut had_transmit = false;
+
+        // Inner loop: drain poll_output until Timeout
+        loop {
+            match session.rtc.poll_output() {
+                Ok(Output::Transmit(t)) => {
+                    had_transmit = true;
+                    let framed = frame_packet(&t.contents);
+                    if let Err(e) = tcp_stream.write_all(&framed).await {
+                        return Err(WebRTCError::ConnectionFailed(format!("TCP write: {}", e)));
+                    }
+                }
+                Ok(Output::Event(event)) => {
+                    handle_event(session, event, ctx);
+                }
+                Ok(Output::Timeout(t)) => {
+                    next_timeout = t;
+                    break;
+                }
+                Err(e) => {
+                    return Err(WebRTCError::ConnectionFailed(format!("poll_output: {}", e)));
+                }
+            }
+        }
+
+        cycles += 1;
+        if !had_transmit || cycles >= MAX_DRAIN_CYCLES {
+            break;
+        }
+
+        // Re-trigger timeout so the NullPacer refreshes its queue snapshot
+        // and can emit the next queued packet.
+        if let Err(e) = session.rtc.handle_input(Input::Timeout(Instant::now())) {
+            warn!("Session {} drain re-trigger error: {}", session.id, e);
+            break;
+        }
+    }
+
+    Ok(next_timeout)
+}
+
+/// Lightweight drain: emit pending Transmit outputs for a single RTP packet.
+///
+/// Used in the per-packet interleaved write+drain loop for video RTP.
+/// Handles events inline so session state stays consistent.
+async fn drain_outputs_fast(
+    session: &mut RtcSession,
+    tcp_stream: &mut TcpStream,
+    ctx: &EventContext<'_>,
+) -> Result<(), WebRTCError> {
     loop {
         match session.rtc.poll_output() {
             Ok(Output::Transmit(t)) => {
@@ -381,17 +525,13 @@ async fn drain_outputs(
             Ok(Output::Event(event)) => {
                 handle_event(session, event, ctx);
             }
-            Ok(Output::Timeout(t)) => {
-                next_timeout = t;
-                break;
-            }
+            Ok(Output::Timeout(_)) => break,
             Err(e) => {
                 return Err(WebRTCError::ConnectionFailed(format!("poll_output: {}", e)));
             }
         }
     }
-
-    Ok(next_timeout)
+    Ok(())
 }
 
 /// Context passed to event handlers so they can dispatch DataChannel messages.
@@ -401,6 +541,7 @@ struct EventContext<'a> {
     clipboard: &'a Arc<Mutex<ClipboardReceiver>>,
     runtime_settings: &'a Arc<RuntimeSettings>,
     shared_state: &'a Arc<SharedState>,
+    last_pong: &'a Arc<AtomicU64>,
 }
 
 /// Handle a str0m event.
@@ -415,6 +556,14 @@ fn handle_event(session: &mut RtcSession, event: Event, ctx: &EventContext) {
             match media.kind {
                 MediaKind::Video => {
                     session.video_mid = Some(media.mid);
+                    // Discover negotiated H.264 PT from codec config
+                    for p in session.rtc.codec_config().params() {
+                        if p.spec().codec == str0m::format::Codec::H264 {
+                            session.video_pt = Some(p.pt());
+                            info!("Session {} video PT: {:?} (H264)", session.id, p.pt());
+                            break;
+                        }
+                    }
                     info!("Session {} video mid: {:?}", session.id, media.mid);
                 }
                 MediaKind::Audio => {
@@ -442,6 +591,7 @@ fn handle_event(session: &mut RtcSession, event: Event, ctx: &EventContext) {
         Event::ChannelOpen(id, label) => {
             session.dc_id = Some(id);
             info!("Session {} DataChannel '{}' opened (id={:?})", session.id, label, id);
+            ctx.shared_state.datachannel_open_count.fetch_add(1, Ordering::Relaxed);
         }
 
         Event::ChannelData(data) => {
@@ -453,6 +603,10 @@ fn handle_event(session: &mut RtcSession, event: Event, ctx: &EventContext) {
                 session.dc_id = None;
             }
             info!("Session {} DataChannel closed (id={:?})", session.id, id);
+        }
+
+        Event::KeyframeRequest(_) => {
+            ctx.shared_state.request_keyframe();
         }
 
         _ => {
@@ -477,6 +631,11 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
             return;
         }
     };
+
+    if text.starts_with("pong") {
+        ctx.last_pong.store(now_millis(), Ordering::Relaxed);
+        return;
+    }
 
     // Try specialized handlers first
     if ctx.upload_handler.lock().unwrap_or_else(|e| e.into_inner()).handle_control_message(text) {
@@ -571,4 +730,12 @@ fn handle_datachannel_data(session: &mut RtcSession, data: ChannelData, ctx: &Ev
             debug!("Session {} DC parse error: {}", session.id, e);
         }
     }
+}
+
+fn now_millis() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }

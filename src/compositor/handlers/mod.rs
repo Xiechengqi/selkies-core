@@ -6,7 +6,7 @@ pub mod xdg_shell;
 use crate::compositor::Compositor;
 
 use std::io::Write;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 
 use smithay::input::dnd::{DnDGrab, DndGrabHandler, GrabType, Source};
 use smithay::input::pointer::Focus;
@@ -16,7 +16,7 @@ use smithay::reexports::wayland_server::Resource;
 use smithay::utils::Serial;
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::data_device::{
-    set_data_device_focus, request_data_device_client_selection,
+    set_data_device_focus,
     DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
 };
 use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
@@ -83,35 +83,49 @@ delegate_seat!(Compositor);
 impl SelectionHandler for Compositor {
     type SelectionUserData = ();
 
-    fn new_selection(&mut self, ty: SelectionTarget, source: Option<SelectionSource>, seat: Seat<Self>) {
+    fn new_selection(&mut self, ty: SelectionTarget, source: Option<SelectionSource>, _seat: Seat<Self>) {
+        log::info!("new_selection called: ty={:?}, has_source={}", ty, source.is_some());
         if ty != SelectionTarget::Clipboard {
             return;
         }
         let source = match source {
             Some(s) => s,
-            None => return,
+            None => {
+                log::debug!("new_selection: no source (compositor-owned selection), skipping");
+                return;
+            }
         };
+
+        // Suppress client re-assertions that happen right after browser→compositor
+        // clipboard set. When we call set_data_device_selection, the focused client
+        // (e.g. Chromium) re-asserts its own wl_data_source with stale content.
+        if let Some(until) = self.clipboard_suppress_until {
+            if std::time::Instant::now() < until {
+                log::info!("new_selection: suppressed (within browser clipboard window)");
+                return;
+            }
+            self.clipboard_suppress_until = None;
+        }
+
         let mime_types = source.mime_types();
+        log::info!("new_selection: mime_types={:?}", mime_types);
         let text_mime = mime_types.iter().find(|m| {
             m.contains("text/plain") || m.contains("UTF8_STRING") || m.contains("utf8")
         });
         let mime = match text_mime {
             Some(m) => m.clone(),
-            None => return,
+            None => {
+                log::warn!("new_selection: no text mime type found in {:?}", mime_types);
+                return;
+            }
         };
 
-        // Create pipe: write_fd goes to client, read_fd we keep
-        let mut fds = [0i32; 2];
-        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-            return;
-        }
-        let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-        let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
-
-        if request_data_device_client_selection::<Self>(&seat, mime, write_fd).is_ok() {
-            // Store read end; main loop will poll it after dispatch
-            self.clipboard_read_fd = Some(read_fd);
-        }
+        // Defer the actual data request to the main loop.
+        // smithay updates seat_data.clipboard_selection AFTER new_selection returns,
+        // so calling request_data_device_client_selection here would fail because
+        // the selection is still the old compositor-owned one.
+        log::info!("new_selection: deferring clipboard read for mime={}", mime);
+        self.clipboard_pending_mime = Some(mime);
     }
 
     fn send_selection(
@@ -122,6 +136,7 @@ impl SelectionHandler for Compositor {
         _seat: Seat<Self>,
         _user_data: &Self::SelectionUserData,
     ) {
+        log::info!("send_selection called: mime={}, has_pending_paste={}", mime_type, self.pending_paste.is_some());
         if let Some(ref text) = self.pending_paste {
             if mime_type.contains("text") || mime_type.contains("string") || mime_type.contains("utf8") {
                 let mut file = std::fs::File::from(fd);

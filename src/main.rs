@@ -77,7 +77,7 @@ fn main() {
     let log_level = if args.verbose { "debug" } else { "info" };
     env_logger::Builder::new()
         .parse_filters(&format!(
-            "ivnc={},smithay={},webrtc=warn,webrtc_ice=warn",
+            "ivnc={},smithay={},str0m=warn,webrtc=warn,webrtc_ice=warn",
             log_level, log_level
         ))
         .init();
@@ -100,7 +100,6 @@ fn main() {
         error!("Invalid configuration: {}", e);
         std::process::exit(1);
     }
-
     let width = config.display.width;
     let height = config.display.height;
     info!("Display: {}x{}", width, height);
@@ -203,17 +202,23 @@ fn run(
 
     // Audio capture thread
     if config.audio.enabled {
+        info!("Starting audio capture thread (rate={} ch={} bitrate={})",
+            config.audio.sample_rate, config.audio.channels, config.audio.bitrate);
         let st = shared_state.clone();
         let r = running.clone();
         let ac = config.audio.clone();
         std::thread::Builder::new().name("audio-capture".into()).spawn(move || {
+            info!("Audio capture thread started");
             let rt_audio = RuntimeAudioConfig {
                 sample_rate: ac.sample_rate, channels: ac.channels, bitrate: ac.bitrate,
             };
-            if let Err(e) = run_audio_capture(rt_audio, st.audio_sender.clone(), r) {
-                warn!("Audio capture ended: {}", e);
+            match run_audio_capture(rt_audio, st.audio_sender.clone(), r) {
+                Ok(()) => info!("Audio capture thread exited normally"),
+                Err(e) => warn!("Audio capture ended with error: {}", e),
             }
         })?;
+    } else {
+        info!("Audio capture disabled in config");
     }
 
     // Main compositor loop
@@ -229,11 +234,16 @@ fn run(
     let mut prev_window_count: usize = 0;
     let mut keyframe_buf: Vec<Vec<u8>> = Vec::new();
     let mut in_keyframe = false;
+    let mut rtp_frame_buf: Vec<Vec<u8>> = Vec::new();
+    let mut prev_rtp_ts: Option<u32> = None;
     let mut last_render = Instant::now();
     let mut prev_button_mask: u32 = 0;
     let mut prev_cursor_name: String = "default".to_string();
     let mut prev_taskbar_json: String = String::new();
-    let mut prev_receiver_count: usize = 0;
+    let mut prev_dc_open_count: u64 = 0;
+    // Non-blocking clipboard pipe read state
+    let mut clipboard_pipe: Option<std::fs::File> = None;
+    let mut clipboard_pipe_buf: Vec<u8> = Vec::new();
 
     info!("Compositor loop starting at {} fps", target_fps);
 
@@ -242,27 +252,41 @@ fn run(
         comp.space.refresh();
         comp.popups.cleanup();
         comp.display_handle.flush_clients().ok();
-        drain_input_events(&mut input_rx, &mut comp, &shared_state, &mut prev_button_mask);
-        comp.display_handle.flush_clients().ok(); // flush injected input events immediately
 
-        // Read clipboard from Wayland client (remote → browser)
-        if let Some(fd) = comp.clipboard_read_fd.take() {
-            let mut file = std::fs::File::from(fd);
-            let mut buf = Vec::new();
-            if file.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
-                if let Ok(text) = String::from_utf8(buf) {
-                    let encoded = base64::engine::general_purpose::STANDARD.encode(&text);
-                    let msg = format!("clipboard,{}", encoded);
-                    info!("Clipboard from remote app: {} bytes, sending: {}...", text.len(), &msg[..msg.len().min(80)]);
-                    match shared_state.text_sender.send(msg) {
-                        Ok(n) => info!("Clipboard broadcast to {} receivers", n),
-                        Err(e) => warn!("Clipboard broadcast failed: {}", e),
+        // Deferred clipboard read: new_selection saved the mime type but couldn't
+        // call request_data_device_client_selection because smithay hadn't updated
+        // the seat's selection yet. Now after dispatch() it's safe to request.
+        if let Some(mime) = comp.clipboard_pending_mime.take() {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            use smithay::wayland::selection::data_device::request_data_device_client_selection;
+
+            let mut fds = [0i32; 2];
+            if unsafe { libc::pipe(fds.as_mut_ptr()) } == 0 {
+                let read_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[0]) };
+                let write_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[1]) };
+                // Set read end to non-blocking
+                unsafe {
+                    let flags = libc::fcntl(read_fd.as_raw_fd(), libc::F_GETFL);
+                    if flags >= 0 {
+                        libc::fcntl(read_fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
                     }
                 }
+                info!("Deferred clipboard: requesting client data for mime={}", mime);
+                if request_data_device_client_selection::<Compositor>(&comp.seat, mime, write_fd).is_ok() {
+                    comp.clipboard_read_fd = Some(read_fd);
+                    // Flush immediately so the client receives the fd and can write data
+                    comp.display_handle.flush_clients().ok();
+                } else {
+                    warn!("Deferred clipboard: request_data_device_client_selection failed");
+                }
+            } else {
+                warn!("Deferred clipboard: pipe() failed");
             }
         }
 
-        // Browser clipboard → remote compositor (drain all pending items)
+        // Browser clipboard → remote compositor (drain all pending items).
+        // Process BEFORE input events so that when Ctrl+V arrives, the
+        // clipboard selection is already set and the app can read it.
         {
             let mut rx = shared_state.clipboard_incoming_rx.lock().unwrap();
             while let Ok(b64) = rx.try_recv() {
@@ -277,7 +301,60 @@ fn run(
                             vec!["text/plain;charset=utf-8".into(), "text/plain".into(), "UTF8_STRING".into()],
                             (),
                         );
+                        // Suppress client clipboard re-assertions for a short window.
+                        // The focused client (e.g. Chromium) will re-assert its own
+                        // wl_data_source with stale content in response to our selection change.
+                        comp.clipboard_suppress_until = Some(Instant::now() + Duration::from_millis(500));
                         info!("Clipboard from browser: {} bytes", text.len());
+                    }
+                }
+            }
+        }
+        comp.display_handle.flush_clients().ok();
+
+        drain_input_events(&mut input_rx, &mut comp, &shared_state, &mut prev_button_mask);
+        comp.display_handle.flush_clients().ok(); // flush injected input events immediately
+
+        // Read clipboard from Wayland client (remote → browser).
+        // The pipe read fd is non-blocking so we accumulate data across
+        // loop iterations without deadlocking the compositor.
+        if let Some(fd) = comp.clipboard_read_fd.take() {
+            clipboard_pipe_buf.clear();
+            clipboard_pipe = Some(std::fs::File::from(fd));
+        }
+        if let Some(ref mut file) = clipboard_pipe {
+            let mut tmp = [0u8; 4096];
+            loop {
+                match file.read(&mut tmp) {
+                    Ok(0) => {
+                        // EOF — client closed write end, data is complete
+                        if !clipboard_pipe_buf.is_empty() {
+                            if let Ok(text) = String::from_utf8(clipboard_pipe_buf.clone()) {
+                                let encoded = base64::engine::general_purpose::STANDARD.encode(&text);
+                                let msg = format!("clipboard,{}", encoded);
+                                info!("Clipboard from remote app: {} bytes", text.len());
+                                match shared_state.text_sender.send(msg) {
+                                    Ok(n) => info!("Clipboard broadcast to {} receivers", n),
+                                    Err(e) => warn!("Clipboard broadcast failed: {}", e),
+                                }
+                            }
+                        }
+                        clipboard_pipe_buf.clear();
+                        clipboard_pipe = None;
+                        break;
+                    }
+                    Ok(n) => {
+                        clipboard_pipe_buf.extend_from_slice(&tmp[..n]);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        // No more data available yet, try again next iteration
+                        break;
+                    }
+                    Err(_) => {
+                        // Pipe error, discard
+                        clipboard_pipe_buf.clear();
+                        clipboard_pipe = None;
+                        break;
                     }
                 }
             }
@@ -307,13 +384,15 @@ fn run(
             comp.taskbar_dirty = true;
         }
 
-        // Force taskbar resend when a new session connects
-        let cur_receivers = shared_state.text_sender.receiver_count();
-        if cur_receivers > prev_receiver_count {
+        // Force taskbar resend when a new DataChannel opens
+        // (receiver_count increases at subscribe time, before the DC is ready,
+        //  so we use the datachannel_open_count which bumps on ChannelOpen)
+        let cur_dc_open = shared_state.datachannel_open_count.load(Ordering::Relaxed);
+        if cur_dc_open > prev_dc_open_count {
             prev_taskbar_json.clear();
             comp.taskbar_dirty = true;
         }
-        prev_receiver_count = cur_receivers;
+        prev_dc_open_count = cur_dc_open;
 
         // Broadcast taskbar window list to frontend when dirty
         if comp.taskbar_dirty {
@@ -367,6 +446,22 @@ fn run(
                 warn!("Resize failed: {}", e);
             } else {
                 shared_state.set_display_size(w, h);
+
+                // Re-configure all non-dialog toplevel windows to the new output size
+                let new_size: smithay::utils::Size<i32, smithay::utils::Logical> =
+                    (w as i32, h as i32).into();
+                for window in comp.space.elements() {
+                    let toplevel = window.toplevel().unwrap();
+                    let surface_id = toplevel.wl_surface().id().protocol_id();
+                    if comp.dialog_surfaces.contains(&surface_id) {
+                        continue;
+                    }
+                    toplevel.with_pending_state(|state| {
+                        state.size = Some(new_size);
+                    });
+                    toplevel.send_pending_configure();
+                }
+
                 // Rebuild pipeline with new dimensions
                 info!("Rebuilding GStreamer pipeline for {}x{}", w, h);
                 let _ = pipeline.stop();
@@ -437,7 +532,7 @@ fn run(
             }
         }
 
-        pull_and_broadcast_rtp(&pipeline, &shared_state, &mut rtp_packets, &mut keyframe_buf, &mut in_keyframe);
+        pull_and_broadcast_rtp(&pipeline, &shared_state, &mut rtp_packets, &mut keyframe_buf, &mut in_keyframe, &mut rtp_frame_buf, &mut prev_rtp_ts);
 
         if shared_state.take_keyframe_request() {
             pipeline.request_keyframe();
@@ -843,37 +938,76 @@ fn pull_and_broadcast_rtp(
     rtp_count: &mut u64,
     keyframe_buf: &mut Vec<Vec<u8>>,
     in_keyframe: &mut bool,
+    frame_buf: &mut Vec<Vec<u8>>,
+    prev_ts: &mut Option<u32>,
 ) {
     while let Some(sample) = pipeline.try_pull_sample() {
         if let Some(buffer) = sample.buffer() {
             let map = buffer.map_readable().unwrap();
             let data = map.as_slice().to_vec();
 
-            let is_kf = is_h264_keyframe_packet(&data);
-            if is_kf && !*in_keyframe {
-                keyframe_buf.clear();
-                *in_keyframe = true;
-            }
-            if *in_keyframe {
-                keyframe_buf.push(data.clone());
-                let marker = data.len() >= 2 && (data[1] & 0x80) != 0;
-                if marker {
-                    shared.set_keyframe_cache(keyframe_buf.clone());
-                    log::info!("Cached keyframe: {} pkts, {} bytes",
-                        keyframe_buf.len(),
-                        keyframe_buf.iter().map(|p| p.len()).sum::<usize>());
-                    *in_keyframe = false;
+            let ts = webrtc::media_track::rtp_util::get_timestamp(&data).unwrap_or(0);
+
+            // When timestamp changes, the previous frame is complete —
+            // set marker bit on its last packet and flush.
+            if let Some(prev) = *prev_ts {
+                if ts != prev && !frame_buf.is_empty() {
+                    flush_frame(frame_buf, shared, rtp_count, keyframe_buf, in_keyframe);
                 }
             }
-
-            if *rtp_count < 5 {
-                log::info!("RTP pkt #{}: {} bytes, kf={}, first16={:02x?}",
-                    *rtp_count, data.len(), is_kf,
-                    &data[..data.len().min(16)]);
-            }
-            *rtp_count += 1;
-            shared.broadcast_rtp(data);
+            *prev_ts = Some(ts);
+            frame_buf.push(data);
         }
+    }
+
+    // Don't hold the last frame indefinitely — flush it now so the
+    // browser can decode without waiting for the next frame's first packet.
+    if !frame_buf.is_empty() {
+        flush_frame(frame_buf, shared, rtp_count, keyframe_buf, in_keyframe);
+    }
+}
+
+/// Set the marker bit on the last packet in the frame buffer, then broadcast all packets.
+fn flush_frame(
+    frame_buf: &mut Vec<Vec<u8>>,
+    shared: &Arc<web::SharedState>,
+    rtp_count: &mut u64,
+    keyframe_buf: &mut Vec<Vec<u8>>,
+    in_keyframe: &mut bool,
+) {
+    // Set marker bit on the last packet of the frame
+    if let Some(last) = frame_buf.last_mut() {
+        if last.len() >= 2 {
+            last[1] |= 0x80;
+        }
+    }
+
+    for data in frame_buf.drain(..) {
+        let is_kf = is_h264_keyframe_packet(&data);
+        if is_kf && !*in_keyframe {
+            keyframe_buf.clear();
+            *in_keyframe = true;
+        }
+        if *in_keyframe {
+            keyframe_buf.push(data.clone());
+            let marker = data.len() >= 2 && (data[1] & 0x80) != 0;
+            if marker {
+                shared.set_keyframe_cache(keyframe_buf.clone());
+                log::info!("Cached keyframe: {} pkts, {} bytes",
+                    keyframe_buf.len(),
+                    keyframe_buf.iter().map(|p| p.len()).sum::<usize>());
+                *in_keyframe = false;
+            }
+        }
+
+        if *rtp_count < 5 {
+            log::info!("RTP pkt #{}: {} bytes, kf={}, marker={}, first16={:02x?}",
+                *rtp_count, data.len(), is_kf,
+                data.len() >= 2 && (data[1] & 0x80) != 0,
+                &data[..data.len().min(16)]);
+        }
+        *rtp_count += 1;
+        shared.broadcast_rtp(data);
     }
 }
 
@@ -910,7 +1044,7 @@ async fn run_async_services(
             std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
         );
         let candidate_ip = if bind_ip.is_unspecified() {
-            detect_local_ip().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
         } else {
             bind_ip
         };
@@ -970,66 +1104,12 @@ fn apply_cli_overrides(config: &mut Config, args: &Args) {
     if let Some(ref d) = args.upload_dir {
         config.input.upload_dir = d.clone();
     }
-    if let Some(v) = args.webrtc_ice_trickle {
-        config.webrtc.ice_trickle = v;
+    if let Some(ref c) = args.webrtc_public_candidate {
+        config.webrtc.public_candidate = Some(c.clone());
     }
-    if let Some(ref ips) = args.webrtc_nat1to1 {
-        config.webrtc.nat1to1_ips = ips.split(',').map(|s| s.trim().to_string()).collect();
+    if let Some(v) = args.webrtc_candidate_from_host_header {
+        config.webrtc.candidate_from_host_header = v;
     }
-    if let Some(ref url) = args.webrtc_ip_retrieval_url {
-        config.webrtc.ip_retrieval_url = url.clone();
-    }
-    if let Some(ref p) = args.webrtc_profile {
-        config.webrtc.network_profile = Some(p.clone());
-    }
-    if let Some(ref h) = args.webrtc_stun_host {
-        config.webrtc.stun_host = h.clone();
-    }
-    if let Some(p) = args.webrtc_stun_port {
-        config.webrtc.stun_port = p;
-    }
-    if let Some(ref h) = args.webrtc_turn_host {
-        config.webrtc.turn_host = h.clone();
-    }
-    if let Some(p) = args.webrtc_turn_port {
-        config.webrtc.turn_port = p;
-    }
-    if let Some(ref proto) = args.webrtc_turn_protocol {
-        config.webrtc.turn_protocol = proto.clone();
-    }
-    if let Some(v) = args.webrtc_turn_tls {
-        config.webrtc.turn_tls = v;
-    }
-    if let Some(ref s) = args.webrtc_turn_shared_secret {
-        config.webrtc.turn_shared_secret = s.clone();
-    }
-    if let Some(ref u) = args.webrtc_turn_username {
-        config.webrtc.turn_username = u.clone();
-    }
-    if let Some(ref p) = args.webrtc_turn_password {
-        config.webrtc.turn_password = p.clone();
-    }
-    if let Some(ref range) = args.webrtc_ephemeral_udp_port_range {
-        if let Some((lo, hi)) = range.split_once('-') {
-            if let (Ok(lo), Ok(hi)) = (lo.trim().parse::<u16>(), hi.trim().parse::<u16>()) {
-                config.webrtc.ephemeral_udp_port_range = Some([lo, hi]);
-            }
-        }
-    }
-    if let Some(p) = args.webrtc_udp_mux_port {
-        config.webrtc.udp_mux_port = p;
-    }
-    if let Some(p) = args.webrtc_tcp_mux_port {
-        config.webrtc.tcp_mux_port = p;
-    }
-}
-
-/// Detect a routable local IP address by connecting a UDP socket to a public address.
-/// The socket is never actually sent — this just lets the OS pick the right source IP.
-fn detect_local_ip() -> Option<std::net::IpAddr> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("8.8.8.8:80").ok()?;
-    Some(socket.local_addr().ok()?.ip())
 }
 
 /// Set up GTK CSS to hide headerbars on fullscreen windows.

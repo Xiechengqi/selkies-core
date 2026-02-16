@@ -62,6 +62,15 @@ pub struct Compositor {
     /// Pipe read fd for reading client clipboard data
     pub clipboard_read_fd: Option<OwnedFd>,
 
+    /// Deferred clipboard read: mime type to request after event_loop.dispatch()
+    /// (smithay updates seat selection AFTER new_selection returns, so we must defer)
+    pub clipboard_pending_mime: Option<String>,
+
+    /// Suppress client clipboard reads shortly after browser→compositor clipboard set.
+    /// When set_data_device_selection is called, the focused client may re-assert its
+    /// own selection, triggering new_selection with stale content. We skip those.
+    pub clipboard_suppress_until: Option<std::time::Instant>,
+
     /// Surfaces that have already had their CSD titlebar offset applied
     pub titlebar_adjusted: HashSet<u32>,
 
@@ -133,6 +142,8 @@ impl Compositor {
             pending_paste: None,
             clipboard_outgoing: None,
             clipboard_read_fd: None,
+            clipboard_pending_mime: None,
+            clipboard_suppress_until: None,
             titlebar_adjusted: HashSet::new(),
             csd_retry_count: 0,
             taskbar_dirty: false,

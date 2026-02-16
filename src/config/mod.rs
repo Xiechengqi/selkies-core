@@ -208,177 +208,67 @@ pub struct AudioConfig {
     pub bitrate: u32,
 }
 
-/// ICE server configuration for WebRTC NAT traversal
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IceServerConfig {
-    /// STUN/TURN server URLs (e.g., "stun:stun.l.google.com:19302")
-    pub urls: Vec<String>,
-
-    /// Username for TURN authentication (optional)
-    #[serde(default)]
-    pub username: Option<String>,
-
-    /// Credential for TURN authentication (optional)
-    #[serde(default)]
-    pub credential: Option<String>,
-}
-
-impl Default for IceServerConfig {
-    fn default() -> Self {
-        Self {
-            urls: vec!["stun:stun.l.google.com:19302".to_string()],
-            username: None,
-            credential: None,
-        }
-    }
-}
-
 /// WebRTC streaming configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebRTCConfig {
     /// Enable WebRTC streaming (if false, falls back to WebSocket mode)
     pub enabled: bool,
 
-    /// Optional network profile ("lan" or "wan")
+    /// Force TCP-only ICE/WebRTC behavior
+    #[serde(default = "default_tcp_only")]
+    pub tcp_only: bool,
+
+    /// Public candidate address (e.g., "1.2.3.4:8008") for ICE-TCP
     #[serde(default)]
-    pub network_profile: Option<String>,
+    pub public_candidate: Option<String>,
 
-    /// Enable Trickle ICE (send candidates as they are found)
-    #[serde(default = "default_ice_trickle")]
-    pub ice_trickle: bool,
-
-    /// ICE servers for NAT traversal
-    #[serde(default)]
-    pub ice_servers: Vec<IceServerConfig>,
-
-    /// STUN host for NAT traversal (optional)
-    #[serde(default)]
-    pub stun_host: String,
-
-    /// STUN port for NAT traversal (optional)
-    #[serde(default)]
-    pub stun_port: u16,
-
-    /// TURN host for relay (optional)
-    #[serde(default)]
-    pub turn_host: String,
-
-    /// TURN port for relay (optional)
-    #[serde(default)]
-    pub turn_port: u16,
-
-    /// TURN transport protocol: "udp" or "tcp"
-    #[serde(default = "default_turn_protocol")]
-    pub turn_protocol: String,
-
-    /// Enable TURN over TLS/DTLS
-    #[serde(default)]
-    pub turn_tls: bool,
-
-    /// TURN shared secret for HMAC credentials (optional)
-    #[serde(default)]
-    pub turn_shared_secret: String,
-
-    /// TURN username for legacy auth (optional)
-    #[serde(default)]
-    pub turn_username: String,
-
-    /// TURN password for legacy auth (optional)
-    #[serde(default)]
-    pub turn_password: String,
+    /// Allow candidate override from Host header
+    #[serde(default = "default_candidate_from_host_header")]
+    pub candidate_from_host_header: bool,
 
     /// Video codec selection
     #[serde(default)]
     pub video_codec: VideoCodec,
 
     /// Target video bitrate in kbps
+    #[serde(default = "default_video_bitrate")]
     pub video_bitrate: u32,
 
     /// Maximum video bitrate in kbps
+    #[serde(default = "default_video_bitrate_max")]
     pub video_bitrate_max: u32,
 
     /// Minimum video bitrate in kbps
+    #[serde(default = "default_video_bitrate_min")]
     pub video_bitrate_min: u32,
 
     /// Hardware encoder preference
     #[serde(default)]
     pub hardware_encoder: HardwareEncoder,
 
-    /// Enable adaptive bitrate control
-    pub adaptive_bitrate: bool,
-
-    /// Congestion control algorithm ("goog-remb", "transport-cc")
-    pub congestion_control: String,
-
-    /// Maximum latency target in milliseconds
-    pub max_latency_ms: u32,
-
-    /// Enable forward error correction
-    pub fec_enabled: bool,
-
-    /// Enable retransmissions (RTX)
-    pub rtx_enabled: bool,
-
     /// GStreamer pipeline latency in ms
+    #[serde(default = "default_pipeline_latency_ms")]
     pub pipeline_latency_ms: u32,
 
     /// Keyframe interval in frames
+    #[serde(default = "default_keyframe_interval")]
     pub keyframe_interval: u32,
-
-    /// NAT 1:1 external IP mappings (optional)
-    #[serde(default)]
-    pub nat1to1_ips: Vec<String>,
-
-    /// URL used to fetch external IP when NAT mappings are not provided
-    #[serde(default)]
-    pub ip_retrieval_url: String,
-
-    /// Ephemeral UDP port range for ICE (optional)
-    #[serde(default)]
-    pub ephemeral_udp_port_range: Option<[u16; 2]>,
-
-    /// Single UDP mux port for all peers (0 to disable)
-    #[serde(default)]
-    pub udp_mux_port: u16,
-
-    /// Single TCP mux port for all peers (0 to disable)
-    #[serde(default)]
-    pub tcp_mux_port: u16,
 }
 
 impl Default for WebRTCConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            network_profile: None,
-            ice_trickle: true,
-            ice_servers: vec![IceServerConfig::default()],
-            stun_host: "stun.l.google.com".to_string(),
-            stun_port: 19302,
-            turn_host: String::new(),
-            turn_port: 3478,
-            turn_protocol: "udp".to_string(),
-            turn_tls: false,
-            turn_shared_secret: String::new(),
-            turn_username: String::new(),
-            turn_password: String::new(),
+            tcp_only: true,
+            public_candidate: None,
+            candidate_from_host_header: true,
             video_codec: VideoCodec::H264,
             video_bitrate: 8000,       // 8 Mbps default (screen content needs higher bitrate)
             video_bitrate_max: 16000,  // 16 Mbps max
             video_bitrate_min: 1000,   // 1 Mbps min
             hardware_encoder: HardwareEncoder::Auto,
-            adaptive_bitrate: true,
-            congestion_control: "goog-remb".to_string(),
-            max_latency_ms: 100,
-            fec_enabled: false,
-            rtx_enabled: true,
             pipeline_latency_ms: 50,
             keyframe_interval: 60,
-            nat1to1_ips: Vec::new(),
-            ip_retrieval_url: String::new(),
-            ephemeral_udp_port_range: None,
-            udp_mux_port: 0,
-            tcp_mux_port: 0,
         }
     }
 }
@@ -483,25 +373,14 @@ impl Config {
             }
         }
 
-        if let Some(range) = self.webrtc.ephemeral_udp_port_range {
-            if range[0] == 0 || range[1] == 0 || range[0] > range[1] {
-                return Err("Invalid WebRTC ephemeral UDP port range".into());
+        if !self.webrtc.tcp_only {
+            return Err("WebRTC tcp_only must be true in this build".into());
+        }
+
+        if let Some(ref candidate) = self.webrtc.public_candidate {
+            if candidate.parse::<std::net::SocketAddr>().is_err() {
+                return Err("WebRTC public_candidate must be in ip:port format".into());
             }
-        }
-
-        if !self.webrtc.turn_protocol.is_empty()
-            && self.webrtc.turn_protocol != "udp"
-            && self.webrtc.turn_protocol != "tcp"
-        {
-            return Err("WebRTC TURN protocol must be \"udp\" or \"tcp\"".into());
-        }
-
-        if (!self.webrtc.turn_shared_secret.is_empty()
-            || !self.webrtc.turn_username.is_empty()
-            || !self.webrtc.turn_password.is_empty())
-            && self.webrtc.turn_host.is_empty()
-        {
-            return Err("WebRTC TURN host is required when TURN auth is configured".into());
         }
 
         if self.audio.enabled {
@@ -560,6 +439,14 @@ fn default_basic_auth_enabled() -> bool {
     true
 }
 
+fn default_tcp_only() -> bool {
+    true
+}
+
+fn default_candidate_from_host_header() -> bool {
+    true
+}
+
 fn default_basic_auth_user() -> String {
     "user".to_string()
 }
@@ -576,10 +463,8 @@ fn default_upload_dir() -> String {
     "~/Desktop".to_string()
 }
 
-fn default_ice_trickle() -> bool {
-    true
-}
-
-fn default_turn_protocol() -> String {
-    "udp".to_string()
-}
+fn default_video_bitrate() -> u32 { 8000 }
+fn default_video_bitrate_max() -> u32 { 16000 }
+fn default_video_bitrate_min() -> u32 { 1000 }
+fn default_pipeline_latency_ms() -> u32 { 50 }
+fn default_keyframe_interval() -> u32 { 60 }

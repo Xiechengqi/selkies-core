@@ -10,7 +10,7 @@ authors = ["iVnc Team"]
 tokio = { version = "1.0", features = ["full"] }
 
 # Wayland compositor
-smithay = { path = "../smithay", default-features = false, features = ["wayland_frontend", "desktop", "renderer_pixman"] }
+smithay = { git = "https://github.com/Smithay/smithay.git", rev = "3d3f9e359352d95cffd1e53287d57df427fcbd34", default-features = false, features = ["wayland_frontend", "desktop", "renderer_pixman"] }
 calloop = "0.14.0"
 xkbcommon = { version = "0.9.0", features = ["wayland"] }
 bitflags = "2"
@@ -77,7 +77,7 @@ mimalloc = "0.1"
 libc = "0.2"
 
 # WebRTC stack (str0m Sans-I/O)
-str0m = { path = "../str0m", default-features = false, features = ["aws-lc-rs"] }
+str0m = { git = "https://github.com/algesten/str0m", tag = "0.16.2", default-features = false, features = ["aws-lc-rs"] }
 ureq = "2"
 
 # GStreamer bindings

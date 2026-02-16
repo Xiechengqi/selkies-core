@@ -13,12 +13,16 @@
       } else {
         window.__IVNC_WS_PORT__ = "8007";
       }
+      window.__IVNC_TCP_ONLY__ = false;
       fetch(`/ws-config?ts=${Date.now()}`, { cache: 'no-store' })
         .then((resp) => resp.ok ? resp.json() : null)
         .then((data) => {
           if (data && data.ws_port) {
             window.__IVNC_WS_PORT__ = String(data.ws_port);
             console.log('iVnc WS port set from ws-config', window.__IVNC_WS_PORT__);
+          }
+          if (data && typeof data.tcp_only === 'boolean') {
+            window.__IVNC_TCP_ONLY__ = data.tcp_only;
           }
         })
         .catch((err) => {

@@ -1,23 +1,18 @@
 # iVnc Configuration Example
 # Copy this file to config.toml and customize as needed
-
-[server]
-# Run in foreground (true) or daemonize (false)
-foreground = true
+#
+# iVnc 使用 str0m Sans-I/O WebRTC 库，HTTP/WebSocket/ICE-TCP 共享同一端口。
+# 音频捕获需要 PulseAudio/PipeWire 运行，并设置 XDG_RUNTIME_DIR 环境变量。
 
 [display]
-# X11 display to capture (e.g., ":0", ":1")
-display = ":0"
-# Display width (0 = auto-detect)
+# Display width (0 = auto-detect from client)
 width = 0
-# Display height (0 = auto-detect)
+# Display height (0 = auto-detect from client)
 height = 0
-# Window manager to launch when auto-creating X11 display ("openbox", "fluxbox", "" to disable)
-window_manager = "openbox"
 
 [http]
-# HTTP server port (for health checks and WebRTC signaling)
-port = 8000
+# HTTP server port (also used for WebSocket signaling and ICE-TCP)
+port = 8008
 # Enable HTTP basic authentication
 basic_auth_enabled = true
 # Basic auth username
@@ -68,16 +63,24 @@ logfile = null
 format = "json"
 
 # ============================================================================
-# WebRTC Configuration
+# WebRTC Configuration (str0m Sans-I/O)
 # ============================================================================
 
 [webrtc]
-# Enable WebRTC streaming (default: true if feature is enabled)
+# Enable WebRTC streaming (default: true)
 enabled = true
-# Network profile: "lan" or "wan" (optional)
-network_profile = ""
-# Enable Trickle ICE (send candidates as they are found)
-ice_trickle = true
+
+# TCP-only mode (required — str0m uses ICE-lite with TCP passive candidates)
+tcp_only = true
+
+# Public candidate address for ICE-TCP (recommended for public/NAT deployments)
+# The browser needs a routable address to connect. If not set and
+# candidate_from_host_header is true, the Host header from the HTTP request
+# is used to construct the candidate address.
+# public_candidate = "1.2.3.4:8008"
+
+# Allow candidate override from Host header (useful behind reverse proxies)
+candidate_from_host_header = true
 
 # Video codec: "h264", "vp8", "vp9", "av1"
 video_codec = "h264"
@@ -99,66 +102,8 @@ video_bitrate_min = 500
 # - qsv: Intel Quick Sync Video hardware encoding
 hardware_encoder = "auto"
 
-# Enable adaptive bitrate control
-adaptive_bitrate = true
-
-# Congestion control algorithm: "goog-remb" or "transport-cc"
-congestion_control = "goog-remb"
-
-# Maximum latency target in milliseconds
-max_latency_ms = 100
-
-# Enable forward error correction (FEC)
-fec_enabled = false
-
-# Enable retransmissions (RTX)
-rtx_enabled = true
-
 # GStreamer pipeline latency in milliseconds
 pipeline_latency_ms = 50
 
 # Keyframe interval in frames (lower = more keyframes = better error recovery)
 keyframe_interval = 60
-
-# NAT 1:1 external IP mappings (optional)
-nat1to1_ips = []
-
-# URL to fetch external IP if nat1to1_ips is empty (optional)
-ip_retrieval_url = ""
-
-# STUN host/port (optional)
-stun_host = "stun.l.google.com"
-stun_port = 19302
-
-# TURN settings (optional)
-turn_host = ""
-turn_port = 3478
-turn_protocol = "udp"
-turn_tls = false
-turn_shared_secret = ""
-turn_username = ""
-turn_password = ""
-
-# Ephemeral UDP port range for ICE (optional)
-ephemeral_udp_port_range = [59000, 59100]
-
-# Single UDP mux port for all peers (0 to disable)
-udp_mux_port = 0
-
-# Single TCP mux port for all peers (0 to disable)
-tcp_mux_port = 0
-
-# ICE servers for NAT traversal (STUN/TURN)
-# Multiple servers can be configured for redundancy
-[[webrtc.ice_servers]]
-urls = ["stun:stun.l.google.com:19302"]
-
-# Example TURN server configuration (uncomment to use)
-# [[webrtc.ice_servers]]
-# urls = ["turn:turn.example.com:3478"]
-# username = "your-username"
-# credential = "your-password"
-
-# Additional public STUN servers (optional)
-# [[webrtc.ice_servers]]
-# urls = ["stun:stun1.l.google.com:19302", "stun:stun2.l.google.com:19302"]

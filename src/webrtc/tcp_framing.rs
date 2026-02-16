@@ -15,6 +15,15 @@ pub fn frame_packet(data: &[u8]) -> Vec<u8> {
     framed
 }
 
+/// Maximum allowed RFC 4571 frame size (bytes).
+pub const MAX_RFC4571_FRAME: usize = 4096;
+
+#[derive(Debug)]
+pub enum TcpFrameError {
+    FrameTooLarge(usize),
+    ZeroLength,
+}
+
 /// Stateful decoder for RFC 4571 framed TCP streams.
 ///
 /// Handles partial reads across TCP segment boundaries.
@@ -33,18 +42,24 @@ impl TcpFrameDecoder {
     }
 
     /// Extract the next complete packet, if available
-    pub fn next_packet(&mut self) -> Option<Vec<u8>> {
+    pub fn next_packet(&mut self) -> Result<Option<Vec<u8>>, TcpFrameError> {
         if self.buf.len() < 2 {
-            return None;
+            return Ok(None);
         }
         let length = u16::from_be_bytes([self.buf[0], self.buf[1]]) as usize;
+        if length == 0 {
+            return Err(TcpFrameError::ZeroLength);
+        }
+        if length > MAX_RFC4571_FRAME {
+            return Err(TcpFrameError::FrameTooLarge(length));
+        }
         let total = 2 + length;
         if self.buf.len() < total {
-            return None;
+            return Ok(None);
         }
         let pkt = self.buf[2..total].to_vec();
         self.buf.drain(..total);
-        Some(pkt)
+        Ok(Some(pkt))
     }
 }
 
@@ -61,9 +76,9 @@ mod tests {
 
         let mut decoder = TcpFrameDecoder::new();
         decoder.extend(&framed);
-        let decoded = decoder.next_packet().unwrap();
+        let decoded = decoder.next_packet().unwrap().unwrap();
         assert_eq!(decoded, data);
-        assert!(decoder.next_packet().is_none());
+        assert!(decoder.next_packet().unwrap().is_none());
     }
 
     #[test]
@@ -76,7 +91,7 @@ mod tests {
         for &byte in &framed {
             decoder.extend(&[byte]);
         }
-        let decoded = decoder.next_packet().unwrap();
+        let decoded = decoder.next_packet().unwrap().unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -89,8 +104,8 @@ mod tests {
         combined.extend_from_slice(&p2);
         decoder.extend(&combined);
 
-        assert_eq!(decoder.next_packet().unwrap(), b"first");
-        assert_eq!(decoder.next_packet().unwrap(), b"second");
-        assert!(decoder.next_packet().is_none());
+        assert_eq!(decoder.next_packet().unwrap().unwrap(), b"first");
+        assert_eq!(decoder.next_packet().unwrap().unwrap(), b"second");
+        assert!(decoder.next_packet().unwrap().is_none());
     }
 }

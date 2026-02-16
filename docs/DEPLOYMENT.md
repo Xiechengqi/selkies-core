@@ -1,35 +1,45 @@
 # Deployment Guide
 
-This document describes how to deploy selkies-core on a Linux host system.
+本文档描述如何在 Linux 主机上部署 iVnc。
 
-## System Requirements
+## 系统要求
 
-- Linux (X11-based desktop)
-- Xvfb or X.org installed
-- Rust 1.70+ toolchain
-- X11 development files
-- **GStreamer 1.0+**
-- **Hardware encoder drivers** (optional, for hardware acceleration)
+- Linux（内置 Smithay Wayland 合成器，无需外部 X11/Wayland）
+- Rust 1.75+ 工具链
+- GStreamer 1.0+
+- PulseAudio 或 PipeWire（音频捕获）
+- 硬件编码器驱动（可选）
 
-## Dependencies
+## 依赖安装
 
 ### Ubuntu/Debian
 
-#### 基础依赖
+#### 编译依赖
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
     build-essential \
     pkg-config \
+    cmake \
+    curl \
+    ca-certificates \
     libx11-dev \
     libxcb1-dev \
     libxkbcommon-dev \
-    xvfb \
-    openbox
+    libssl-dev \
+    libgstreamer1.0-dev \
+    libgstreamer-plugins-base1.0-dev \
+    libpulse-dev \
+    libopus-dev \
+    libwayland-dev \
+    libpixman-1-dev \
+    libinput-dev \
+    libudev-dev \
+    libseat-dev
 ```
 
-#### GStreamer 依赖
+#### GStreamer 运行时
 
 ```bash
 sudo apt-get install -y \
@@ -38,12 +48,20 @@ sudo apt-get install -y \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly \
-    gstreamer1.0-x \
-    libgstreamer1.0-dev \
-    libgstreamer-plugins-base1.0-dev
+    gstreamer1.0-x
 ```
 
-#### 硬件加速支持（可选）
+#### 音频支持
+
+```bash
+# PipeWire（推荐）
+sudo apt-get install -y pipewire pipewire-pulse pipewire-media-session
+
+# 或 PulseAudio
+sudo apt-get install -y pulseaudio
+```
+
+#### 硬件加速（可选）
 
 ```bash
 # Intel VA-API
@@ -51,46 +69,61 @@ sudo apt-get install -y gstreamer1.0-vaapi libva-dev intel-media-va-driver-non-f
 
 # NVIDIA NVENC（需要 NVIDIA 驱动）
 sudo apt-get install -y gstreamer1.0-plugins-bad
-
-# 音频支持（可选）
-sudo apt-get install -y libpulse-dev libopus-dev libasound2-dev
 ```
 
 ### Fedora/RHEL
 
 ```bash
 sudo dnf install -y \
-    gcc \
+    gcc cmake \
     pkg-config \
     libX11-devel \
     libxcb-devel \
     libxkbcommon-devel \
+    openssl-devel \
+    gstreamer1-devel \
+    gstreamer1-plugins-base-devel \
     pulseaudio-libs-devel \
     opus-devel \
-    alsa-lib-devel \
-    Xvfb \
-    openbox
+    wayland-devel \
+    pixman-devel \
+    libinput-devel \
+    systemd-devel \
+    libseat-devel \
+    pipewire pipewire-pulseaudio
 ```
 
 ### Arch Linux
 
 ```bash
 sudo pacman -S --needed \
-    base-devel \
-    libx11 \
-    libxcb \
-    xcb-util \
-    libpulse \
-    opus \
-    alsa-lib \
-    xorg-xvfb \
-    openbox
+    base-devel cmake \
+    libx11 libxcb xcb-util \
+    libxkbcommon openssl \
+    gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
+    libpulse opus \
+    wayland pixman libinput \
+    pipewire pipewire-pulse
 ```
 
-## Building
+## Smithay 依赖
+
+iVnc 依赖本地 smithay 仓库（需放在项目同级目录）：
 
 ```bash
-cd /app/projects/selkies-core
+git clone https://github.com/Smithay/smithay.git ../smithay
+cd ../smithay && git checkout 3d3f9e359352d95cffd1e53287d57df427fcbd34
+```
+
+## 编译
+
+```bash
+cd /path/to/iVnc
+
+# 使用 build.sh（推荐）
+bash build.sh --release
+
+# 或直接使用 cargo
 cargo build --release
 ```
 
@@ -107,45 +140,39 @@ cargo build --release --features nvenc
 cargo build --release --features qsv
 ```
 
-### 带音频支持
+构建产物位于 `target/release/ivnc`，`build.sh` 会自动复制到项目根目录。
+
+## 安装
 
 ```bash
-cargo build --release --features audio
+# 复制二进制
+sudo cp target/release/ivnc /usr/local/bin/
+
+# 复制配置文件
+sudo cp config.example.toml /etc/ivnc.toml
+
+# 按需编辑配置
+sudo vi /etc/ivnc.toml
 ```
 
-The binary will be at `target/release/selkies-core`.
+## 配置
 
-## Installation
-
-```bash
-# Copy binary
-sudo cp target/release/selkies-core /usr/local/bin/
-
-# Create config directory
-sudo mkdir -p /etc/selkies-core
-
-# Copy default config
-sudo cp config/selkies-core.toml /etc/selkies-core/
-
-# Create runtime directory
-sudo mkdir -p /var/run/selkies-core
-sudo chown $USER:$USER /var/run/selkies-core
-```
-
-## Configuration
-
-Edit `/etc/selkies-core/selkies-core.toml`:
+编辑 `/etc/ivnc.toml`：
 
 ### 基础配置
 
 ```toml
 [display]
-display = ":0"
-width = 0                   # 0 = auto-detect
-height = 0                  # 0 = auto-detect
+width = 1920
+height = 1080
+refresh_rate = 60
 
 [http]
-port = 8000
+host = "0.0.0.0"
+port = 8008
+basic_auth_enabled = true
+basic_auth_user = "user"
+basic_auth_password = "change_me"
 
 [encoding]
 target_fps = 30
@@ -157,181 +184,156 @@ max_fps = 60
 ```toml
 [webrtc]
 enabled = true
-video_codec = "h264"        # h264, vp8, vp9, av1
-video_bitrate = 4000        # kbps
-hardware_encoder = "auto"   # auto, software, vaapi, nvenc, qsv
-adaptive_bitrate = true
-max_latency_ms = 100
+tcp_only = true
+video_codec = "h264"
+video_bitrate = 8000
+video_bitrate_max = 16000
+video_bitrate_min = 1000
+hardware_encoder = "auto"
+keyframe_interval = 60
+candidate_from_host_header = true
+# 公网部署时设置外部地址
+# public_candidate = "1.2.3.4:8008"
+```
 
-[[webrtc.ice_servers]]
-urls = ["stun:stun.l.google.com:19302"]
+### 音频配置
+
+```toml
+[audio]
+enabled = true
+sample_rate = 48000
+channels = 2
+bitrate = 128000
 ```
 
 完整配置示例请参考 `config.example.toml`。
 
-## Starting the Server
+## 启动服务
 
-### Manual (Foreground)
+### 手动启动（前台）
 
 ```bash
-selkies-core --foreground --verbose
+# 确保 PulseAudio/PipeWire 可用
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+
+# 启动 PipeWire（如未自动启动）
+pipewire &
+pipewire-media-session &
+pipewire-pulse &
+
+# 启动 iVnc
+ivnc -c /etc/ivnc.toml --verbose
 ```
 
 ### Systemd Service
 
-Create `/etc/systemd/system/selkies-core.service`:
+创建 `/etc/systemd/system/ivnc.service`：
 
 ```ini
 [Unit]
-Description=Selkies Core Streaming Server
-After=network.target
+Description=iVnc Wayland Desktop Streaming Server
+After=network.target pipewire.service
 
 [Service]
 Type=simple
-User=selkies
-Group=selkies
-ExecStart=/usr/local/bin/selkies-core
+User=root
+ExecStart=/usr/local/bin/ivnc -c /etc/ivnc.toml
 Restart=always
 RestartSec=5
-Environment="DISPLAY=:0"
+Environment="XDG_RUNTIME_DIR=/run/user/0"
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Enable and start:
+启用并启动：
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable selkies-core
-sudo systemctl start selkies-core
+sudo systemctl enable ivnc
+sudo systemctl start ivnc
 ```
 
-## Setting up X11 Desktop
-
-### Using Xvfb
-
-```bash
-# Start Xvfb
-Xvfb :0 -screen 0 1920x1080x24 &
-export DISPLAY=:0
-
-# Start Openbox
-openbox &
-```
-
-### Using Real X Server
-
-Ensure X server is running and `$DISPLAY` is set correctly.
-
-## Running as Unprivileged User
-
-For security, run selkies-core as a non-root user:
-
-```bash
-# Create dedicated user
-sudo useradd -r selkies
-
-# Set permissions
-sudo chown -R selkies:selkies /var/run/selkies-core
-```
-
-Update systemd service to run as `selkies` user.
-
-## Docker Deployment
+## Docker 部署
 
 ### Dockerfile
 
 ```dockerfile
-FROM rust:1.70 AS builder
+FROM rust:1.75 AS builder
 
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    pkg-config \
-    libx11-dev \
-    libxcb1-dev \
-    libxkbcommon-dev \
-    libgstreamer1.0-dev \
-    libgstreamer-plugins-base1.0-dev
+    pkg-config cmake libx11-dev libxcb1-dev libxkbcommon-dev libssl-dev \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+    libpulse-dev libopus-dev libwayland-dev libpixman-1-dev \
+    libinput-dev libudev-dev libseat-dev
 
-WORKDIR /app
+WORKDIR /build
 COPY . .
 RUN cargo build --release
 
 FROM ubuntu:22.04
 
 RUN apt-get update && apt-get install -y \
-    xvfb \
-    openbox \
-    libx11-6 \
-    libxcb1 \
-    gstreamer1.0-tools \
-    gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-good \
-    gstreamer1.0-plugins-bad \
-    gstreamer1.0-x \
-    gstreamer1.0-vaapi \
+    libx11-6 libxcb1 libpulse0 \
+    pipewire pipewire-pulse \
+    gstreamer1.0-tools gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly gstreamer1.0-x \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/selkies-core /usr/local/bin/
-COPY config.example.toml /etc/selkies-core.toml
+COPY --from=builder /build/target/release/ivnc /usr/local/bin/
+COPY config.example.toml /etc/ivnc.toml
 
-EXPOSE 8000
+EXPOSE 8008
 
-CMD ["selkies-core", "--config", "/etc/selkies-core.toml"]
+ENV XDG_RUNTIME_DIR=/run/user/0
+
+CMD ["ivnc", "-c", "/etc/ivnc.toml"]
 ```
 
-## Verification
-
-Check if the server is running:
+## 验证
 
 ```bash
-# Check process
-ps aux | grep selkies-core
+# 检查进程
+ps aux | grep ivnc
 
-# Check ports
-ss -tlnp | grep 8000
+# 检查端口
+ss -tlnp | grep 8008
 
-# Health check
-curl http://localhost:8000/health
+# 健康检查
+curl http://localhost:8008/health
+
+# 检查音频
+pactl info
 ```
 
-## Troubleshooting
+浏览器访问 `http://<host>:8008/` 即可使用。
 
-### X11 Connection Failed
+## 故障排除
 
-Ensure X server is running and `$DISPLAY` is set:
+### WebRTC 连接失败
 
-```bash
-echo $DISPLAY
-# Should show :0 or similar
-```
+1. 确认浏览器能访问 HTTP 端口
+2. 检查浏览器控制台是否有 ICE/DTLS 错误
+3. 如果通过反向代理，确保 WebSocket 和 TCP 连接能正确转发到同一端口
+4. 公网部署时需设置 `public_candidate` 或启用 `candidate_from_host_header`
 
-### Permission Denied
+### 无音频
 
-Check X server permissions:
-
-```bash
-xhost +local:
-```
+1. 确认 PulseAudio/PipeWire 正在运行：`pactl info`
+2. 确认 `XDG_RUNTIME_DIR` 环境变量已设置
+3. 确认配置文件中 `[audio] enabled = true`
+4. 检查日志中是否有 "PulseAudio capture opened" 消息
+5. 可通过 `PULSE_SOURCE` 环境变量指定音频源
 
 ### GStreamer 编码器未找到
 
-检查可用的编码器：
-
 ```bash
-gst-inspect-1.0 | grep -E "(x264|vp8|vaapi|nvenc|qsv)"
-```
-
-安装缺失的插件：
-
-```bash
+gst-inspect-1.0 | grep -E "(x264|openh264|vp8|vaapi|nvenc|qsv)"
 sudo apt-get install gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
 ```
 
 ### 硬件编码器不可用
-
-检查硬件支持：
 
 ```bash
 # VA-API
@@ -348,21 +350,24 @@ nvidia-smi
 hardware_encoder = "software"
 ```
 
-### WebRTC 连接失败
+### 高延迟或卡顿
 
-1. 检查防火墙设置（允许 UDP 端口）
-2. 配置 TURN 服务器用于 NAT 穿透
-3. 检查浏览器控制台错误信息
+- 降低分辨率和比特率
+- 减小 keyframe_interval
+- 使用硬件加速编码
 
-### Poor Performance
+```toml
+[webrtc]
+video_bitrate = 4000
+keyframe_interval = 30
 
-- Reduce target FPS
-- Lower video bitrate
-- Use hardware acceleration
+[display]
+width = 1280
+height = 720
+```
 
-## Port Reference
+## 端口说明
 
-| Port | Protocol | Description |
-|------|----------|-------------|
-| 8000 | HTTP | Web UI, health checks, WebRTC signaling |
-| UDP  | WebRTC | RTP media transport (dynamic ports) |
+| 端口 | 协议 | 说明 |
+|------|------|------|
+| 8008 | HTTP/WS/TCP | Web UI、健康检查、WebRTC 信令、ICE-TCP（同端口复用） |

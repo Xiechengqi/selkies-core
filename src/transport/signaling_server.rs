@@ -46,8 +46,9 @@ pub async fn handle_signaling_connection(
     socket: WebSocket,
     state: Arc<SharedState>,
     session_manager: Arc<SessionManager>,
+    client_host: Option<String>,
 ) {
-    info!("New signaling WebSocket connection established");
+    info!("New signaling WebSocket connection established (host: {:?})", client_host);
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     // Create a channel for sending messages
@@ -86,6 +87,7 @@ pub async fn handle_signaling_connection(
                         &session_manager,
                         &tx,
                         wire_format,
+                        client_host.as_deref(),
                     ).await {
                         let _ = tx.send(response);
                     }
@@ -101,6 +103,7 @@ pub async fn handle_signaling_connection(
                             &session_manager,
                             &tx,
                             wire_format,
+                            client_host.as_deref(),
                         ).await {
                             let _ = tx.send(response);
                         }
@@ -161,11 +164,12 @@ async fn handle_signaling_message(
     session_manager: &Arc<SessionManager>,
     tx: &mpsc::UnboundedSender<String>,
     wire_format: WireFormat,
+    client_host: Option<&str>,
 ) -> Option<String> {
     match message {
         SignalingMessage::Offer { sdp, session_id: provided_session_id } => {
             // Create session and accept offer in one step
-            match session_manager.create_session_with_offer(&sdp).await {
+            match session_manager.create_session_with_offer(&sdp, client_host).await {
                 Ok((sid, answer_sdp)) => {
                     *session_id = Some(sid.clone());
                     info!("Session {} created with SDP answer", sid);
@@ -217,9 +221,6 @@ async fn handle_signaling_message(
         SignalingMessage::IceCandidate { candidate, sdp_mid: _, sdp_mline_index: _, session_id: _ } => {
             // With ICE-lite, we don't need remote candidates from the browser.
             // The browser will connect to our TCP passive candidate directly.
-            // Record for metrics but don't process.
-            let (transport, candidate_type) = parse_ice_candidate(&candidate);
-            state.record_ice_candidate(transport.as_deref(), candidate_type.as_deref());
             debug!("Received browser ICE candidate (ignored in ICE-lite mode): {}", &candidate[..candidate.len().min(80)]);
             None
         }
@@ -342,23 +343,6 @@ fn format_signaling_message(message: &SignalingMessage, wire_format: WireFormat)
             _ => None,
         },
     }
-}
-
-fn parse_ice_candidate(candidate: &str) -> (Option<String>, Option<String>) {
-    let parts: Vec<&str> = candidate.split_whitespace().collect();
-    if parts.len() < 8 {
-        return (None, None);
-    }
-
-    let transport = parts.get(2).map(|v| v.to_ascii_lowercase());
-    let mut candidate_type = None;
-    if let Some(idx) = parts.iter().position(|p| *p == "typ") {
-        if let Some(typ) = parts.get(idx + 1) {
-            candidate_type = Some(typ.to_ascii_lowercase());
-        }
-    }
-
-    (transport, candidate_type)
 }
 
 #[cfg(test)]

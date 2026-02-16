@@ -33,7 +33,7 @@ const PENDING_SESSION_TTL: Duration = Duration::from_secs(30);
 /// - Creates str0m Rtc instances (synchronous, Sans-I/O)
 /// - Injects TCP passive ICE candidates (same port as HTTP)
 /// - Hands off TCP connections to per-session drive loops
-/// - Does NOT manage UDP sockets or STUN/TURN
+/// - Does NOT manage external relay servers
 pub struct SessionManager {
     /// Active sessions awaiting TCP connection (after SDP but before ICE-TCP)
     pending_sessions: Arc<RwLock<HashMap<String, PendingSession>>>,
@@ -103,19 +103,26 @@ impl SessionManager {
     pub async fn create_session_with_offer(
         &self,
         offer_sdp: &str,
+        client_host: Option<&str>,
     ) -> Result<(String, String), WebRTCError> {
         let session_id = uuid::Uuid::new_v4().to_string();
 
         // Create str0m Rtc instance
         let mut session = RtcSession::new(session_id.clone());
 
-        // Add TCP passive candidate pointing to our listen address
-        session.add_local_tcp_candidate(self.listen_addr)?;
-        info!("Session {} added TCP candidate: {}", session_id, self.listen_addr);
+        // Determine the ICE candidate address.
+        // If the browser connected via a tunnel/proxy, use the Host header
+        // so the ICE-TCP candidate points to the same public address.
+        let candidate_addr = resolve_candidate_addr(&self.config, client_host, self.listen_addr);
+
+        // Add TCP passive candidate
+        session.add_local_tcp_candidate(candidate_addr)?;
+        info!("Session {} added TCP candidate: {} (host header: {:?})", session_id, candidate_addr, client_host);
 
         // Accept the SDP offer and generate answer
+        info!("Session {} SDP offer ({} bytes): {:?}", session_id, offer_sdp.len(), &offer_sdp[..offer_sdp.len().min(200)]);
         let answer_sdp = session.accept_offer(offer_sdp)?;
-        info!("Session {} SDP answer generated", session_id);
+        info!("Session {} SDP answer generated ({} bytes):\n{}", session_id, answer_sdp.len(), answer_sdp);
 
         // Check capacity and insert under a single write lock to avoid TOCTOU race
         let mut pending = self.pending_sessions.write().await;
@@ -147,7 +154,7 @@ impl SessionManager {
 
     /// Try to match an incoming TCP connection to a pending session.
     ///
-    /// Called by the TCP protocol splitter when it detects a STUN/DTLS
+    /// Called by the TCP protocol splitter when it detects ICE/DTLS
     /// first byte on an accepted connection. The first packet is used
     /// to identify which Rtc instance should handle this connection
     /// via `rtc.accepts()`.
@@ -161,16 +168,34 @@ impl SessionManager {
         local_addr: SocketAddr,
         first_packet: &[u8],
     ) -> Result<(), WebRTCError> {
+        // Decode RFC 4571 framing — the raw TCP data has a 2-byte length prefix
+        let mut decoder = super::tcp_framing::TcpFrameDecoder::new();
+        decoder.extend(first_packet);
+        let ice_pkt = match decoder.next_packet() {
+            Ok(Some(pkt)) => pkt,
+            Ok(None) => {
+                return Err(WebRTCError::ConnectionFailed(
+                    "Incomplete RFC 4571 frame in first packet".to_string(),
+                ));
+            }
+            Err(e) => {
+                return Err(WebRTCError::ConnectionFailed(format!(
+                    "Invalid RFC 4571 frame in first packet: {:?}",
+                    e
+                )));
+            }
+        };
+
         let mut pending = self.pending_sessions.write().await;
 
-        // Find the session that accepts this packet
+        // Find the session that accepts this deframed ICE packet
         let mut matched_id = None;
         for (id, ps) in pending.iter() {
             let recv = str0m::net::Receive {
                 proto: str0m::net::Protocol::Tcp,
                 source: peer_addr,
                 destination: local_addr,
-                contents: match first_packet.try_into() {
+                contents: match (&*ice_pkt).try_into() {
                     Ok(c) => c,
                     Err(_) => continue,
                 },
@@ -191,12 +216,12 @@ impl SessionManager {
 
         info!("Session {} matched TCP connection from {}", session_id, peer_addr);
 
-        // Feed the first packet into str0m
+        // Feed the first deframed packet into str0m
         let recv = str0m::net::Receive {
             proto: str0m::net::Protocol::Tcp,
             source: peer_addr,
             destination: local_addr,
-            contents: first_packet.try_into()
+            contents: (&*ice_pkt).try_into()
                 .map_err(|e| WebRTCError::ConnectionFailed(format!("First packet parse: {}", e)))?,
         };
         session.rtc.handle_input(Input::Receive(std::time::Instant::now(), recv))
@@ -234,6 +259,11 @@ impl SessionManager {
     pub fn config(&self) -> &WebRTCConfig {
         &self.config
     }
+
+    /// Get the ICE-TCP candidate listen address.
+    pub fn listen_addr(&self) -> SocketAddr {
+        self.listen_addr
+    }
 }
 
 /// Background task that periodically removes pending sessions that have
@@ -257,4 +287,58 @@ async fn reap_stale_sessions(
             warn!("Reaped stale pending session: {}", id);
         }
     }
+}
+
+/// Parse a Host header value (e.g. "example.com:8008" or "1.2.3.4:8008")
+/// into a SocketAddr. Falls back to `default_port` if no port is specified.
+fn parse_host_to_addr(host: &str, default_port: u16) -> Option<SocketAddr> {
+    // Try direct parse first (covers "1.2.3.4:8008")
+    if let Ok(addr) = host.parse::<SocketAddr>() {
+        return Some(addr);
+    }
+    // Try as "host:port" where host is a domain or bare IP
+    if let Some((h, p)) = host.rsplit_once(':') {
+        if let Ok(port) = p.parse::<u16>() {
+            if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+                return Some(SocketAddr::new(ip, port));
+            }
+            // Domain name — resolve it
+            use std::net::ToSocketAddrs;
+            return format!("{}:{}", h, port).to_socket_addrs().ok()?.next();
+        }
+    }
+    // Bare host without port
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return Some(SocketAddr::new(ip, default_port));
+    }
+    use std::net::ToSocketAddrs;
+    format!("{}:{}", host, default_port).to_socket_addrs().ok()?.next()
+}
+
+fn resolve_candidate_addr(
+    config: &WebRTCConfig,
+    client_host: Option<&str>,
+    listen_addr: SocketAddr,
+) -> SocketAddr {
+    if let Some(ref public_candidate) = config.public_candidate {
+        match public_candidate.parse::<SocketAddr>() {
+            Ok(addr) => return addr,
+            Err(e) => {
+                warn!(
+                    "Invalid public_candidate '{}': {} (falling back to other sources)",
+                    public_candidate, e
+                );
+            }
+        }
+    }
+
+    if config.candidate_from_host_header {
+        if let Some(host) = client_host {
+            if let Some(addr) = parse_host_to_addr(host, listen_addr.port()) {
+                return addr;
+            }
+        }
+    }
+
+    listen_addr
 }

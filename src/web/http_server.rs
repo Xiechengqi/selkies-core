@@ -4,7 +4,7 @@
 //! and same-port HTTP + ICE-TCP multiplexing. Incoming TCP connections are
 //! classified by peeking the first byte:
 //! - ASCII letters (HTTP methods) → axum HTTP handler
-//! - 0x00-0x03 (STUN) or 0x14-0x17 (DTLS) → WebRTC ICE-TCP session
+//! - 0x00-0x03 (ICE) or 0x14-0x17 (DTLS) → WebRTC ICE-TCP session
 
 #![allow(dead_code)]
 
@@ -30,16 +30,14 @@ use tokio::net::TcpListener;
 use tower::Service;
 use tower_http::services::{ServeDir, ServeFile};
 use base64::Engine;
-use hmac::{Hmac, Mac};
 use serde_json::json;
-use sha1::Sha1;
 
 use crate::webrtc::SessionManager;
 
 /// Classify a TCP connection by its first byte.
 fn classify_first_byte(byte: u8) -> ConnectionType {
     match byte {
-        // STUN: first byte 0x00-0x03
+        // ICE: first byte 0x00-0x03
         0x00..=0x03 => ConnectionType::IceTcp,
         // DTLS: first byte 0x14-0x17 (ChangeCipherSpec, Alert, Handshake, ApplicationData)
         0x14..=0x17 => ConnectionType::IceTcp,
@@ -90,19 +88,25 @@ pub async fn run_http_server_with_webrtc(
         .route("/clients", get(clients_handler))
         .route("/ui-config", get(ui_config_handler))
         .route("/ws-config", get(ws_config_handler))
-        .route("/turn", get(turn_config_handler));
+        ;
 
     // Add WebRTC signaling endpoint if session manager is provided
     if let Some(ref manager) = session_manager {
         info!("Adding WebRTC signaling endpoint at /webrtc");
         let state_clone = state.clone();
         let manager_clone = manager.clone();
-        let signaling_handler = move |ws: WebSocketUpgrade| {
+        let signaling_handler = move |
+            headers: axum::http::HeaderMap,
+            ws: WebSocketUpgrade,
+        | {
             let state = state_clone.clone();
             let manager = manager_clone.clone();
+            let host_str = headers.get(axum::http::header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
             async move {
                 ws.on_upgrade(move |socket| async move {
-                    crate::transport::handle_signaling_connection(socket, state, manager).await;
+                    crate::transport::handle_signaling_connection(socket, state, manager, host_str).await;
                 })
             }
         };
@@ -172,16 +176,20 @@ pub async fn run_http_server_with_webrtc(
             match classify_first_byte(first_byte[0]) {
                 ConnectionType::IceTcp => {
                     if let Some(sm) = sm {
+                        // Use the session manager's candidate address as the
+                        // local destination so str0m can match it against its
+                        // local ICE candidate (0.0.0.0 won't match 127.0.0.1).
+                        let ice_local_addr = sm.listen_addr();
                         // Read the first packet for session matching
                         let mut buf = vec![0u8; 4096];
                         match stream.read(&mut buf).await {
                             Ok(0) => return,
                             Ok(n) => {
                                 buf.truncate(n);
-                                debug!("ICE-TCP connection from {} ({} bytes, first=0x{:02x})",
-                                    peer_addr, n, first_byte[0]);
+                                info!("ICE-TCP connection from {} ({} bytes, first16={:02x?})",
+                                    peer_addr, n, &buf[..n.min(16)]);
                                 if let Err(e) = sm.handle_ice_tcp_connection(
-                                    stream, peer_addr, local_addr, &buf,
+                                    stream, peer_addr, ice_local_addr, &buf,
                                 ).await {
                                     warn!("ICE-TCP session match failed from {}: {}", peer_addr, e);
                                 }
@@ -260,41 +268,13 @@ ivnc_client_latency_ms {}
 # HELP ivnc_client_fps Client-reported FPS
 # TYPE ivnc_client_fps gauge
 ivnc_client_fps {}
-# HELP ivnc_ice_candidates_total Total ICE candidates observed
-# TYPE ivnc_ice_candidates_total counter
-ivnc_ice_candidates_total {}
-# HELP ivnc_ice_candidates_udp Total ICE candidates over UDP
-# TYPE ivnc_ice_candidates_udp counter
-ivnc_ice_candidates_udp {}
-# HELP ivnc_ice_candidates_tcp Total ICE candidates over TCP
-# TYPE ivnc_ice_candidates_tcp counter
-ivnc_ice_candidates_tcp {}
-# HELP ivnc_ice_candidates_host Total ICE candidates of type host
-# TYPE ivnc_ice_candidates_host counter
-ivnc_ice_candidates_host {}
-# HELP ivnc_ice_candidates_srflx Total ICE candidates of type srflx
-# TYPE ivnc_ice_candidates_srflx counter
-ivnc_ice_candidates_srflx {}
-# HELP ivnc_ice_candidates_relay Total ICE candidates of type relay
-# TYPE ivnc_ice_candidates_relay counter
-ivnc_ice_candidates_relay {}
-# HELP ivnc_ice_candidates_prflx Total ICE candidates of type prflx
-# TYPE ivnc_ice_candidates_prflx counter
-ivnc_ice_candidates_prflx {}
 "#,
         uptime,
         clients,
         stats.cpu_percent,
         stats.mem_used,
         stats.client_latency_ms,
-        stats.client_fps,
-        stats.ice_candidates_total,
-        stats.ice_candidates_udp,
-        stats.ice_candidates_tcp,
-        stats.ice_candidates_host,
-        stats.ice_candidates_srflx,
-        stats.ice_candidates_relay,
-        stats.ice_candidates_prflx
+        stats.client_fps
     )
 }
 
@@ -363,26 +343,14 @@ async fn ui_config_handler(State(state): State<Arc<SharedState>>) -> String {
 /// WebSocket configuration handler
 async fn ws_config_handler(State(state): State<Arc<SharedState>>) -> Response {
     let payload = json!({
-        "ws_port": state.config.http.port
+        "ws_port": state.config.http.port,
+        "tcp_only": state.config.webrtc.tcp_only
     });
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(payload.to_string()))
-        .unwrap()
-}
-
-/// TURN/STUN configuration handler for WebRTC
-async fn turn_config_handler(State(state): State<Arc<SharedState>>) -> Response {
-    let ice_servers = build_ice_servers(&state.config.webrtc);
-    let payload = json!({
-        "iceServers": ice_servers
-    });
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(payload.to_string()))
-        .unwrap()
+    .unwrap()
 }
 
 async fn index_handler(State(_state): State<Arc<SharedState>>) -> Response {
@@ -417,73 +385,3 @@ async fn index_handler(State(_state): State<Arc<SharedState>>) -> Response {
 async fn embedded_fallback_handler(uri: Uri) -> Response {
     get_embedded_file(uri.path())
 }
-
-fn build_ice_servers(config: &crate::config::WebRTCConfig) -> Vec<crate::config::IceServerConfig> {
-    let mut servers = Vec::new();
-
-    let has_turn = !config.turn_host.is_empty()
-        || !config.turn_shared_secret.is_empty()
-        || !config.turn_username.is_empty()
-        || !config.turn_password.is_empty();
-    let has_stun = !config.stun_host.is_empty() && config.stun_port != 0;
-
-    if has_stun {
-        servers.push(crate::config::IceServerConfig {
-            urls: vec![format!("stun:{}:{}", config.stun_host, config.stun_port)],
-            username: None,
-            credential: None,
-        });
-    }
-
-    if has_turn && !config.turn_host.is_empty() {
-        let scheme = if config.turn_tls { "turns" } else { "turn" };
-        let transport = if config.turn_protocol.is_empty() {
-            "udp"
-        } else {
-            config.turn_protocol.as_str()
-        };
-        let url = format!(
-            "{}:{}:{}?transport={}",
-            scheme,
-            config.turn_host,
-            config.turn_port,
-            transport
-        );
-
-        let (username, credential) = if !config.turn_shared_secret.is_empty() {
-            let ttl_secs: u64 = 24 * 60 * 60;
-            let expiry = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() + ttl_secs)
-                .unwrap_or(ttl_secs);
-            let user = format!("{}:ivnc", expiry);
-            let password = hmac_sha1_base64(&config.turn_shared_secret, &user);
-            (Some(user), Some(password))
-        } else if !config.turn_username.is_empty() && !config.turn_password.is_empty() {
-            (Some(config.turn_username.clone()), Some(config.turn_password.clone()))
-        } else {
-            (None, None)
-        };
-
-        servers.push(crate::config::IceServerConfig {
-            urls: vec![url],
-            username,
-            credential,
-        });
-    }
-
-    if servers.is_empty() {
-        return config.ice_servers.clone();
-    }
-
-    servers
-}
-
-fn hmac_sha1_base64(secret: &str, message: &str) -> String {
-    let mut mac = Hmac::<Sha1>::new_from_slice(secret.as_bytes())
-        .unwrap_or_else(|_| Hmac::<Sha1>::new_from_slice(&[]).unwrap());
-    mac.update(message.as_bytes());
-    let result = mac.finalize().into_bytes();
-    base64::engine::general_purpose::STANDARD.encode(result)
-}
-

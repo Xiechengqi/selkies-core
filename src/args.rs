@@ -53,69 +53,13 @@ pub struct Args {
     #[arg(long)]
     pub upload_dir: Option<String>,
 
-    /// Enable or disable Trickle ICE (true/false)
+    /// Public candidate address for ICE-TCP (e.g., "1.2.3.4:8008")
     #[arg(long)]
-    pub webrtc_ice_trickle: Option<bool>,
+    pub webrtc_public_candidate: Option<String>,
 
-    /// NAT 1:1 external IP mappings (comma-separated list)
+    /// Allow candidate override from Host header (true/false)
     #[arg(long)]
-    pub webrtc_nat1to1: Option<String>,
-
-    /// URL used to fetch external IP when NAT mappings are not provided
-    #[arg(long)]
-    pub webrtc_ip_retrieval_url: Option<String>,
-
-    /// Network profile for WebRTC ("lan" or "wan")
-    #[arg(long)]
-    pub webrtc_profile: Option<String>,
-
-    /// STUN host (optional)
-    #[arg(long)]
-    pub webrtc_stun_host: Option<String>,
-
-    /// STUN port (optional)
-    #[arg(long)]
-    pub webrtc_stun_port: Option<u16>,
-
-    /// TURN host (optional)
-    #[arg(long)]
-    pub webrtc_turn_host: Option<String>,
-
-    /// TURN port (optional)
-    #[arg(long)]
-    pub webrtc_turn_port: Option<u16>,
-
-    /// TURN protocol: "udp" or "tcp"
-    #[arg(long)]
-    pub webrtc_turn_protocol: Option<String>,
-
-    /// Enable TURN over TLS/DTLS
-    #[arg(long)]
-    pub webrtc_turn_tls: Option<bool>,
-
-    /// TURN shared secret for HMAC credentials
-    #[arg(long)]
-    pub webrtc_turn_shared_secret: Option<String>,
-
-    /// TURN username for legacy auth
-    #[arg(long)]
-    pub webrtc_turn_username: Option<String>,
-
-    /// TURN password for legacy auth
-    #[arg(long)]
-    pub webrtc_turn_password: Option<String>,
-
-    /// Ephemeral UDP port range for ICE (e.g., "59000-59100")
-    #[arg(long)]
-    pub webrtc_ephemeral_udp_port_range: Option<String>,
-
-    /// Single UDP mux port for all peers
-    #[arg(long)]
-    pub webrtc_udp_mux_port: Option<u16>,
-
-    /// Single TCP mux port for all peers
-    #[arg(long)]
-    pub webrtc_tcp_mux_port: Option<u16>,
+    pub webrtc_candidate_from_host_header: Option<bool>,
 
     /// Verbose logging
     #[arg(short, long, action)]
