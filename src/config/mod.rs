@@ -150,6 +150,10 @@ pub struct HttpConfig {
     /// Basic auth password
     #[serde(default = "default_basic_auth_password")]
     pub basic_auth_password: String,
+
+    /// Enable TLS with self-signed certificate (set via --tls CLI flag)
+    #[serde(default)]
+    pub tls: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -306,6 +310,7 @@ impl Default for Config {
                 basic_auth_enabled: true,
                 basic_auth_user: "user".to_string(),
                 basic_auth_password: "mypasswd".to_string(),
+                tls: false,
             },
             encoding: EncodingConfig {
                 target_fps: 30,

@@ -114,7 +114,7 @@ pub fn run_audio_capture(
                         buf.push_back(s);
                     }
                     let mut enc = encoder_clone.lock().unwrap();
-                    encode_ready_frames(&mut enc, &mut buf, frame_size, samples_per_frame, &sender_clone);
+                    encode_ready_frames(&mut enc, &mut buf, samples_per_frame, &sender_clone);
                 },
                 |err| eprintln!("Audio stream error: {:?}", err),
                 None,
@@ -136,7 +136,7 @@ pub fn run_audio_capture(
                         buf.push_back(*sample);
                     }
                     let mut enc = encoder_clone.lock().unwrap();
-                    encode_ready_frames(&mut enc, &mut buf, frame_size, samples_per_frame, &sender_clone);
+                    encode_ready_frames(&mut enc, &mut buf, samples_per_frame, &sender_clone);
                 },
                 |err| eprintln!("Audio stream error: {:?}", err),
                 None,
@@ -159,7 +159,7 @@ pub fn run_audio_capture(
                         buf.push_back(s);
                     }
                     let mut enc = encoder_clone.lock().unwrap();
-                    encode_ready_frames(&mut enc, &mut buf, frame_size, samples_per_frame, &sender_clone);
+                    encode_ready_frames(&mut enc, &mut buf, samples_per_frame, &sender_clone);
                 },
                 |err| eprintln!("Audio stream error: {:?}", err),
                 None,
@@ -188,31 +188,32 @@ fn detect_pulse_monitor_source() -> Option<String> {
         .args(["get-default-sink"])
         .output()
         .ok()?;
-    if !sink_output.status.success() {
-        // Fallback: list sources and pick the first .monitor
-        let src_output = Command::new("pactl")
-            .args(["list", "sources", "short"])
-            .output()
-            .ok()?;
-        let stdout = String::from_utf8_lossy(&src_output.stdout);
-        for line in stdout.lines() {
-            let fields: Vec<&str> = line.split('\t').collect();
-            if fields.len() >= 2 && fields[1].ends_with(".monitor") {
-                log::info!("Auto-detected audio monitor source: {}", fields[1]);
-                return Some(fields[1].to_string());
-            }
+
+    if sink_output.status.success() {
+        let default_sink = String::from_utf8_lossy(&sink_output.stdout).trim().to_string();
+        // PipeWire-Pulse may return "@DEFAULT_SINK@" literally — treat as empty
+        if !default_sink.is_empty() && !default_sink.starts_with('@') {
+            let monitor = format!("{}.monitor", default_sink);
+            log::info!("Auto-detected audio monitor source: {} (from default sink: {})", monitor, default_sink);
+            return Some(monitor);
         }
-        return None;
+        log::info!("get-default-sink returned '{}', falling back to source list", default_sink);
     }
 
-    let default_sink = String::from_utf8_lossy(&sink_output.stdout).trim().to_string();
-    if default_sink.is_empty() {
-        return None;
+    // Fallback: list sources and pick the first .monitor
+    let src_output = Command::new("pactl")
+        .args(["list", "sources", "short"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&src_output.stdout);
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() >= 2 && fields[1].ends_with(".monitor") {
+            log::info!("Auto-detected audio monitor source: {}", fields[1]);
+            return Some(fields[1].to_string());
+        }
     }
-
-    let monitor = format!("{}.monitor", default_sink);
-    log::info!("Auto-detected audio monitor source: {} (from default sink: {})", monitor, default_sink);
-    Some(monitor)
+    None
 }
 
 #[cfg(feature = "pulseaudio")]
@@ -239,27 +240,6 @@ pub fn run_audio_capture(
         channels: config.channels as u8,
     };
 
-    // Determine the audio source to capture from:
-    // 1. PULSE_SOURCE env var (explicit override)
-    // 2. Auto-detect: default sink's monitor source (captures application audio)
-    // 3. Fall back to PulseAudio default source
-    let source = std::env::var("PULSE_SOURCE").ok().or_else(|| {
-        detect_pulse_monitor_source()
-    });
-    let source_ref = source.as_deref();
-
-    let simple = Simple::new(
-        None,
-        "ivnc",
-        Direction::Record,
-        source_ref,
-        "capture",
-        &spec,
-        None,
-        None,
-    )?;
-    log::info!("PulseAudio capture opened (source: {:?})", source_ref);
-
     let mut encoder = Encoder::new(config.sample_rate, channels, Application::Audio)?;
     encoder.set_bitrate(Bitrate::Bits(config.bitrate as i32))?;
 
@@ -268,12 +248,44 @@ pub fn run_audio_capture(
     let mut buffer = VecDeque::<i16>::new();
     let mut read_buf = vec![0u8; samples_per_frame * 2];
 
+    // Outer loop: reconnect to PulseAudio on errors (timeout, disconnect, etc.)
     while running.load(std::sync::atomic::Ordering::Relaxed) {
-        simple.read(&mut read_buf)?;
-        for chunk in read_buf.chunks_exact(2) {
-            buffer.push_back(i16::from_le_bytes([chunk[0], chunk[1]]));
+        // Re-detect source each attempt (PulseAudio may start after iVnc)
+        let source = std::env::var("PULSE_SOURCE").ok().or_else(|| {
+            detect_pulse_monitor_source()
+        });
+        let source_ref = source.as_deref();
+
+        let simple = match Simple::new(
+            None, "ivnc", Direction::Record, source_ref, "capture", &spec, None, None,
+        ) {
+            Ok(s) => {
+                log::info!("PulseAudio capture opened (source: {:?})", source_ref);
+                s
+            }
+            Err(e) => {
+                log::warn!("PulseAudio connect failed (retrying in 3s): {}", e);
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                continue;
+            }
+        };
+
+        // Inner loop: read audio frames until error
+        while running.load(std::sync::atomic::Ordering::Relaxed) {
+            match simple.read(&mut read_buf) {
+                Ok(()) => {
+                    for chunk in read_buf.chunks_exact(2) {
+                        buffer.push_back(i16::from_le_bytes([chunk[0], chunk[1]]));
+                    }
+                    encode_ready_frames(&mut encoder, &mut buffer, samples_per_frame, &sender);
+                }
+                Err(e) => {
+                    log::warn!("PulseAudio read error (reconnecting): {}", e);
+                    buffer.clear();
+                    break; // break inner loop → reconnect in outer loop
+                }
+            }
         }
-        encode_ready_frames(&mut encoder, &mut buffer, frame_size, samples_per_frame, &sender);
     }
 
     Ok(())
@@ -283,17 +295,11 @@ pub fn run_audio_capture(
 fn encode_ready_frames(
     encoder: &mut opus::Encoder,
     buffer: &mut std::collections::VecDeque<i16>,
-    _frame_size: usize,
     samples_per_frame: usize,
     sender: &broadcast::Sender<AudioPacket>,
 ) {
     while buffer.len() >= samples_per_frame {
-        let mut frame = Vec::with_capacity(samples_per_frame);
-        for _ in 0..samples_per_frame {
-            if let Some(sample) = buffer.pop_front() {
-                frame.push(sample);
-            }
-        }
+        let frame: Vec<i16> = buffer.drain(..samples_per_frame).collect();
         let mut out = vec![0u8; 4000];
         if let Ok(len) = encoder.encode(&frame, &mut out) {
             out.truncate(len);

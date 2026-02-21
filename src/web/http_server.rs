@@ -57,6 +57,7 @@ pub async fn run_http_server_with_webrtc(
     port: u16,
     state: Arc<SharedState>,
     session_manager: Option<Arc<SessionManager>>,
+    enable_tls: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("0.0.0.0:{}", port);
 
@@ -136,7 +137,22 @@ pub async fn run_http_server_with_webrtc(
 
     let listener = TcpListener::bind(&addr).await?;
     let local_addr = listener.local_addr()?;
-    info!("HTTP+ICE-TCP server listening on http://{}", local_addr);
+
+    // TLS setup
+    #[cfg(feature = "tls")]
+    let tls_acceptor = if enable_tls {
+        let acceptor = create_tls_acceptor()?;
+        info!("HTTPS+ICE-TCP server listening on https://{}", local_addr);
+        Some(acceptor)
+    } else {
+        info!("HTTP+ICE-TCP server listening on http://{}", local_addr);
+        None
+    };
+    #[cfg(not(feature = "tls"))]
+    {
+        let _ = enable_tls;
+        info!("HTTP+ICE-TCP server listening on http://{}", local_addr);
+    }
 
     if session_manager.is_some() {
         info!("Same-port ICE-TCP multiplexing enabled on :{}", port);
@@ -154,18 +170,17 @@ pub async fn run_http_server_with_webrtc(
 
         let app = app.clone();
         let sm = session_manager.clone();
+        #[cfg(feature = "tls")]
+        let tls_acceptor = tls_acceptor.clone();
 
         tokio::spawn(async move {
-            // Peek the first byte to classify the connection (with timeout
-            // to prevent slow/idle connections from blocking a task forever)
             let mut first_byte = [0u8; 1];
-            let mut stream = tcp_stream;
             let peek_result = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                stream.peek(&mut first_byte),
+                tcp_stream.peek(&mut first_byte),
             ).await;
             match peek_result {
-                Ok(Ok(0)) | Err(_) => return, // Closed or timed out
+                Ok(Ok(0)) | Err(_) => return,
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => {
                     debug!("Peek error from {}: {}", peer_addr, e);
@@ -173,56 +188,106 @@ pub async fn run_http_server_with_webrtc(
                 }
             }
 
+            // In TLS mode: 0x16 = TLS ClientHello → do TLS handshake then serve HTTP
+            // ICE/DTLS bytes (0x00-0x03, 0x14-0x15, 0x17) go directly to ICE handler
+            #[cfg(feature = "tls")]
+            if let Some(ref acceptor) = tls_acceptor {
+                if first_byte[0] == 0x16 {
+                    // TLS handshake
+                    match acceptor.accept(tcp_stream).await {
+                        Ok(tls_stream) => {
+                            serve_http(TokioIo::new(tls_stream), app).await;
+                        }
+                        Err(e) => {
+                            debug!("TLS handshake error from {}: {}", peer_addr, e);
+                        }
+                    }
+                    return;
+                }
+                // Non-TLS byte: ICE-TCP
+                handle_ice_connection(tcp_stream, peer_addr, sm).await;
+                return;
+            }
+
+            // Non-TLS mode: original first-byte classification
             match classify_first_byte(first_byte[0]) {
                 ConnectionType::IceTcp => {
-                    if let Some(sm) = sm {
-                        // Use the session manager's candidate address as the
-                        // local destination so str0m can match it against its
-                        // local ICE candidate (0.0.0.0 won't match 127.0.0.1).
-                        let ice_local_addr = sm.listen_addr();
-                        // Read the first packet for session matching
-                        let mut buf = vec![0u8; 4096];
-                        match stream.read(&mut buf).await {
-                            Ok(0) => return,
-                            Ok(n) => {
-                                buf.truncate(n);
-                                info!("ICE-TCP connection from {} ({} bytes, first16={:02x?})",
-                                    peer_addr, n, &buf[..n.min(16)]);
-                                if let Err(e) = sm.handle_ice_tcp_connection(
-                                    stream, peer_addr, ice_local_addr, &buf,
-                                ).await {
-                                    warn!("ICE-TCP session match failed from {}: {}", peer_addr, e);
-                                }
-                            }
-                            Err(e) => {
-                                debug!("ICE-TCP read error from {}: {}", peer_addr, e);
-                            }
-                        }
-                    } else {
-                        debug!("ICE-TCP connection from {} but no session manager", peer_addr);
-                    }
+                    handle_ice_connection(tcp_stream, peer_addr, sm).await;
                 }
                 ConnectionType::Http => {
-                    // Serve HTTP via hyper with the axum router
-                    let io = TokioIo::new(stream);
-                    let service = hyper::service::service_fn(move |req| {
-                        let mut app = app.clone();
-                        async move {
-                            app.call(req).await
-                        }
-                    });
-                    if let Err(e) = hyper_util::server::conn::auto::Builder::new(
-                        hyper_util::rt::TokioExecutor::new(),
-                    )
-                    .serve_connection_with_upgrades(io, service)
-                    .await
-                    {
-                        debug!("HTTP connection error from {}: {}", peer_addr, e);
-                    }
+                    serve_http(TokioIo::new(tcp_stream), app).await;
                 }
             }
         });
     }
+}
+
+/// Serve HTTP over a generic IO stream
+async fn serve_http<I>(io: TokioIo<I>, app: Router<()>)
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let service = hyper::service::service_fn(move |req| {
+        let mut app = app.clone();
+        async move { app.call(req).await }
+    });
+    let _ = hyper_util::server::conn::auto::Builder::new(
+        hyper_util::rt::TokioExecutor::new(),
+    )
+    .serve_connection_with_upgrades(io, service)
+    .await;
+}
+
+/// Handle an ICE-TCP connection
+async fn handle_ice_connection(
+    mut stream: tokio::net::TcpStream,
+    peer_addr: std::net::SocketAddr,
+    sm: Option<Arc<SessionManager>>,
+) {
+    if let Some(sm) = sm {
+        let ice_local_addr = sm.listen_addr();
+        let mut buf = vec![0u8; 4096];
+        match stream.read(&mut buf).await {
+            Ok(0) => return,
+            Ok(n) => {
+                buf.truncate(n);
+                info!("ICE-TCP connection from {} ({} bytes, first16={:02x?})",
+                    peer_addr, n, &buf[..n.min(16)]);
+                if let Err(e) = sm.handle_ice_tcp_connection(
+                    stream, peer_addr, ice_local_addr, &buf,
+                ).await {
+                    warn!("ICE-TCP session match failed from {}: {}", peer_addr, e);
+                }
+            }
+            Err(e) => {
+                debug!("ICE-TCP read error from {}: {}", peer_addr, e);
+            }
+        }
+    } else {
+        debug!("ICE-TCP connection from {} but no session manager", peer_addr);
+    }
+}
+
+#[cfg(feature = "tls")]
+fn create_tls_acceptor() -> Result<tokio_rustls::TlsAcceptor, Box<dyn std::error::Error>> {
+    use rustls::ServerConfig;
+    use std::sync::Arc as StdArc;
+
+    let cert = rcgen::generate_simple_self_signed(vec![
+        "localhost".to_string(),
+        "ivnc.local".to_string(),
+    ])?;
+    let cert_der = rustls::pki_types::CertificateDer::from(cert.cert);
+    let key_der = rustls::pki_types::PrivateKeyDer::try_from(cert.key_pair.serialize_der())
+        .map_err(|e| format!("TLS key error: {}", e))?;
+
+    let config = ServerConfig::builder_with_provider(StdArc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()?
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)?;
+
+    info!("TLS enabled with self-signed certificate");
+    Ok(tokio_rustls::TlsAcceptor::from(StdArc::new(config)))
 }
 
 /// Health check handler
@@ -287,7 +352,12 @@ async fn basic_auth_middleware(
         return next.run(req).await;
     }
 
-    if req.uri().path() == "/health" {
+    let path = req.uri().path();
+    if path == "/health"
+        || path == "/manifest.json"
+        || path == "/sw.js"
+        || path.starts_with("/icons/")
+    {
         return next.run(req).await;
     }
 

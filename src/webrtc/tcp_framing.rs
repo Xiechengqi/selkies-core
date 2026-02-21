@@ -20,7 +20,7 @@ pub const MAX_RFC4571_FRAME: usize = 4096;
 
 #[derive(Debug)]
 pub enum TcpFrameError {
-    FrameTooLarge(usize),
+    FrameTooLarge(#[allow(dead_code)] usize),
     ZeroLength,
 }
 

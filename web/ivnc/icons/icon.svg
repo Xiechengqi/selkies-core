@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="64" fill="#1a1a2e"/>
+  <rect x="80" y="80" width="352" height="240" rx="16" fill="none" stroke="#e0e0e0" stroke-width="20"/>
+  <rect x="100" y="100" width="312" height="200" rx="8" fill="#16213e"/>
+  <rect x="200" y="340" width="112" height="20" rx="4" fill="#e0e0e0"/>
+  <rect x="160" y="370" width="192" height="12" rx="6" fill="#e0e0e0"/>
+  <text x="256" y="220" text-anchor="middle" font-family="monospace" font-size="64" font-weight="bold" fill="#4ecca3">iVnc</text>
+</svg>

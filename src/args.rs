@@ -69,6 +69,10 @@ pub struct Args {
     #[arg(long, action)]
     pub foreground: bool,
 
+    /// Enable HTTPS with auto-generated self-signed certificate
+    #[arg(long, action)]
+    pub tls: bool,
+
     /// PID file path
     #[arg(long, default_value = "/var/run/ivnc.pid")]
     pub pidfile: PathBuf,

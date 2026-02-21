@@ -53,6 +53,10 @@ pub fn list_embedded_files() -> Vec<String> {
 fn cache_control_for_path(path: &str) -> &'static str {
     if path == "index.html" {
         "no-store, max-age=0"
+    } else if path == "sw.js" {
+        "no-store, max-age=0"
+    } else if path == "manifest.json" {
+        "no-cache, max-age=0"
     } else if path.ends_with(".js") || path.ends_with(".css") {
         "no-cache, max-age=0"
     } else if path.ends_with(".woff2") || path.ends_with(".woff") || path.ends_with(".ttf") {

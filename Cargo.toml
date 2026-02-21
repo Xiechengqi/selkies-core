@@ -16,9 +16,6 @@ xkbcommon = { version = "0.9.0", features = ["wayland"] }
 bitflags = "2"
 pixman = "0.2"
 
-# Image encoding (cursor PNG)
-image = { version = "0.24", default-features = false, features = ["png"] }
-
 # Hash for change detection
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
@@ -34,16 +31,9 @@ serde_json = "1.0"
 toml = "0.8"
 clap = { version = "4.0", features = ["derive"] }
 
-# Concurrency
-crossbeam = "0.8"
-parking_lot = "0.12"
-
 # Logging
 env_logger = "0.10"
 log = "0.4"
-
-# File watching for configuration reload
-notify = { version = "6.0" }
 
 # HTTP server for static files / health checks
 axum = { version = "0.8", features = ["ws"] }
@@ -59,12 +49,9 @@ mime_guess = "2.0"
 # UUID for session tracking
 uuid = { version = "1.0", features = ["v4"] }
 
-# Metrics
-prometheus = "0.13"
-
-# Compression for network efficiency
-flate2 = "1.0"
-miniz_oxide = "0.7"
+# Memory management
+mimalloc = "0.1"
+libc = "0.2"
 
 # Audio capture/encoding (optional)
 cpal = { version = "0.15", optional = true }
@@ -72,31 +59,22 @@ opus = { version = "0.3", optional = true }
 libpulse-simple-binding = { version = "2.28", optional = true }
 libpulse-binding = { version = "2.28", optional = true }
 
-# Memory management
-mimalloc = "0.1"
-libc = "0.2"
-
 # WebRTC stack (str0m Sans-I/O)
 str0m = { git = "https://github.com/algesten/str0m", tag = "0.16.2", default-features = false, features = ["aws-lc-rs"] }
-ureq = "2"
 
 # GStreamer bindings
 gstreamer = "0.22"
 gstreamer-app = "0.22"
 gstreamer-video = "0.22"
-gstreamer-rtp = "0.22"
-glib = "0.19"
 
-# Binary data handling
-bytes = "1.5"
-hmac = "0.12"
-sha1 = "0.10"
-
-[build-dependencies]
-cc = "1.0"
+# TLS (optional, for self-signed HTTPS)
+rcgen = { version = "0.13", optional = true }
+tokio-rustls = { version = "0.26", optional = true }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
 
 [features]
 default = ["pulseaudio"]
+tls = ["rcgen", "tokio-rustls", "rustls"]
 audio = ["cpal", "opus"]
 pulseaudio = ["opus", "libpulse-simple-binding", "libpulse-binding"]
 

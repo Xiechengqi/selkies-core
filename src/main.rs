@@ -19,6 +19,7 @@ mod webrtc;
 use args::Args;
 use base64::Engine;
 use clap::Parser;
+use ::gstreamer as gst;
 use config::Config;
 use audio::{run_audio_capture, AudioConfig as RuntimeAudioConfig};
 use compositor::{Compositor, HeadlessBackend};
@@ -71,7 +72,78 @@ fn resolve_display_name(app_id: &str) -> Option<String> {
     None
 }
 
+/// Check that required shared libraries are present on the system.
+/// Prints friendly install instructions and exits if any are missing.
+fn check_runtime_deps() {
+    let deps: &[(&str, &str)] = &[
+        ("libgstreamer-1.0.so.0", "libgstreamer1.0-0"),
+        ("libgstapp-1.0.so.0", "libgstreamer-plugins-base1.0-0"),
+        ("libpixman-1.so.0", "libpixman-1-0"),
+        ("libxkbcommon.so.0", "libxkbcommon0"),
+        #[cfg(feature = "pulseaudio")]
+        ("libpulse-simple.so.0", "libpulse0"),
+        #[cfg(any(feature = "pulseaudio", feature = "audio"))]
+        ("libopus.so.0", "libopus0"),
+    ];
+
+    let mut missing = Vec::new();
+    for &(soname, pkg) in deps {
+        let cstr = std::ffi::CString::new(soname).unwrap();
+        let handle = unsafe { libc::dlopen(cstr.as_ptr(), libc::RTLD_LAZY) };
+        if handle.is_null() {
+            missing.push((soname, pkg));
+        } else {
+            unsafe { libc::dlclose(handle); }
+        }
+    }
+
+    if !missing.is_empty() {
+        eprintln!("ERROR: Missing runtime libraries:");
+        for (soname, pkg) in &missing {
+            eprintln!("  {} (package: {})", soname, pkg);
+        }
+        let pkgs: Vec<&str> = missing.iter().map(|(_, p)| *p).collect();
+        eprintln!("\nInstall with:\n  apt-get install {}", pkgs.join(" "));
+        std::process::exit(1);
+    }
+
+    // Check GStreamer plugins
+    if gst::init().is_err() {
+        eprintln!("ERROR: Failed to initialize GStreamer");
+        std::process::exit(1);
+    }
+
+    let gst_plugins: &[(&str, &str)] = &[
+        ("videoconvert", "gstreamer1.0-plugins-base"),
+        ("appsrc", "gstreamer1.0-plugins-base"),
+        ("rtph264pay", "gstreamer1.0-plugins-good"),
+        ("rtpvp8pay", "gstreamer1.0-plugins-good"),
+        ("openh264enc", "gstreamer1.0-plugins-bad"),
+        ("ximagesrc", "gstreamer1.0-x"),
+    ];
+
+    let mut missing_plugins = Vec::new();
+    for &(element, pkg) in gst_plugins {
+        if gst::ElementFactory::find(element).is_none() {
+            missing_plugins.push((element, pkg));
+        }
+    }
+
+    if !missing_plugins.is_empty() {
+        eprintln!("WARNING: Missing GStreamer plugins:");
+        for (element, pkg) in &missing_plugins {
+            eprintln!("  {} (package: {})", element, pkg);
+        }
+        let mut pkgs: Vec<&str> = missing_plugins.iter().map(|(_, p)| *p).collect();
+        pkgs.sort_unstable();
+        pkgs.dedup();
+        eprintln!("\nInstall with:\n  apt-get install {}", pkgs.join(" "));
+    }
+}
+
 fn main() {
+    check_runtime_deps();
+
     let args = Args::parse();
 
     let log_level = if args.verbose { "debug" } else { "info" };
@@ -1067,7 +1139,7 @@ async fn run_async_services(
     // HTTP server
     let port = config.http.port;
     info!("Starting HTTP server on port {}", port);
-    web::run_http_server_with_webrtc(port, shared.clone(), session_manager)
+    web::run_http_server_with_webrtc(port, shared.clone(), session_manager, config.http.tls)
         .await
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
             format!("HTTP server error: {}", e).into()
@@ -1109,6 +1181,9 @@ fn apply_cli_overrides(config: &mut Config, args: &Args) {
     }
     if let Some(v) = args.webrtc_candidate_from_host_header {
         config.webrtc.candidate_from_host_header = v;
+    }
+    if args.tls {
+        config.http.tls = true;
     }
 }
 

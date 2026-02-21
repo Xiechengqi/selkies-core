@@ -32,6 +32,20 @@ use crate::compositor::{
     Compositor,
 };
 
+/// Check if `child` is a descendant process of `ancestor` via /proc ppid chain.
+fn is_descendant_of(child: i32, ancestor: i32) -> bool {
+    let mut pid = child;
+    for _ in 0..32 {
+        if pid <= 1 { return false; }
+        if pid == ancestor { return true; }
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", pid)) else { return false };
+        // Field 4 in /proc/PID/stat is PPID
+        let ppid: i32 = stat.split_whitespace().nth(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+        pid = ppid;
+    }
+    false
+}
+
 impl XdgShellHandler for Compositor {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
@@ -40,18 +54,42 @@ impl XdgShellHandler for Compositor {
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let has_parent = surface.parent().is_some();
 
-        // Detect dialog: either has explicit parent, or another toplevel from the
-        // same client already exists (GTK3 FileChooserDialog doesn't set parent
-        // via xdg_toplevel protocol, but opens as a second toplevel from same client)
+        // Detect dialog: has explicit parent, same Wayland client, or the new
+        // window's process is a child/parent of an existing window's process
+        // (handles Chrome subprocess file choosers that are different clients).
         let new_surface_id = surface.wl_surface().id();
         let same_client_toplevel_exists = self.space.elements().any(|w| {
             let existing_id = w.toplevel().unwrap().wl_surface().id();
             existing_id.same_client_as(&new_surface_id)
         });
-        let is_dialog = has_parent || same_client_toplevel_exists;
 
-        log::info!("new_toplevel: is_dialog={} (parent={}, same_client={})",
-            is_dialog, has_parent, same_client_toplevel_exists);
+        let is_child_process = if !same_client_toplevel_exists {
+            // Check if new window's PID is a descendant of any existing window's PID
+            let new_pid = surface.wl_surface().client()
+                .and_then(|c| c.get_credentials(&self.display_handle).ok())
+                .map(|c| c.pid);
+            if let Some(new_pid) = new_pid {
+                self.space.elements().any(|w| {
+                    let existing_pid = w.toplevel().unwrap().wl_surface().client()
+                        .and_then(|c| c.get_credentials(&self.display_handle).ok())
+                        .map(|c| c.pid);
+                    if let Some(ep) = existing_pid {
+                        is_descendant_of(new_pid, ep) || is_descendant_of(ep, new_pid)
+                    } else {
+                        false
+                    }
+                })
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        let is_dialog = has_parent || same_client_toplevel_exists || is_child_process;
+
+        log::info!("new_toplevel: is_dialog={} (parent={}, same_client={}, child_proc={})",
+            is_dialog, has_parent, same_client_toplevel_exists, is_child_process);
 
         let window = Window::new_wayland_window(surface.clone());
 
@@ -177,6 +215,12 @@ impl XdgShellHandler for Compositor {
     }
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
+        // Don't maximize dialogs — they should stay as floating windows
+        let sid = surface.wl_surface().id().protocol_id();
+        if self.dialog_surfaces.contains(&sid) {
+            return;
+        }
+
         let wl_surface = surface.wl_surface().clone();
         let output = self.space.outputs().next().unwrap().clone();
         let output_geo = self.space.output_geometry(&output).unwrap();
@@ -205,6 +249,11 @@ impl XdgShellHandler for Compositor {
     }
 
     fn fullscreen_request(&mut self, surface: ToplevelSurface, _output: Option<WlOutput>) {
+        let sid = surface.wl_surface().id().protocol_id();
+        if self.dialog_surfaces.contains(&sid) {
+            return;
+        }
+
         let wl_surface = surface.wl_surface().clone();
         let output = self.space.outputs().next().unwrap().clone();
         let output_geo = self.space.output_geometry(&output).unwrap();
@@ -244,20 +293,21 @@ impl XdgShellHandler for Compositor {
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         self.taskbar_dirty = true;
 
-        // Remove from dialog tracking
-        self.dialog_surfaces.remove(&surface.wl_surface().id().protocol_id());
+        let proto_id = surface.wl_surface().id().protocol_id();
+        let is_dialog = self.dialog_surfaces.remove(&proto_id);
 
         // Remove only the destroyed surface from window registry (not siblings)
         let surf_id = surface.wl_surface().id();
         self.window_registry.retain(|wl| wl.id() != surf_id);
 
-        // Only kill the owning process if no other toplevels from the same client remain.
-        // Otherwise closing a dialog would kill the entire application.
+        // Only kill the owning process if it's not a dialog and no other toplevels
+        // from the same client remain. Dialog processes (file choosers, etc.) may be
+        // child processes whose termination cascades to the parent app.
         let has_sibling = self.space.elements().any(|w| {
             let wl_id = w.toplevel().unwrap().wl_surface().id();
             wl_id != surf_id && wl_id.same_client_as(&surf_id)
         });
-        if !has_sibling {
+        if !is_dialog && !has_sibling {
             if let Some(client) = surface.wl_surface().client() {
                 if let Ok(creds) = client.get_credentials(&self.display_handle) {
                     let pid = creds.pid;
