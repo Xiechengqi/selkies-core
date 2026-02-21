@@ -17,9 +17,9 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             arch: amd64
             docker_platform: linux/amd64
-          # - target: aarch64-unknown-linux-gnu
-          #   arch: arm64
-          #   docker_platform: linux/arm64
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
+            docker_platform: linux/arm64
 
     steps:
       - name: Checkout code
@@ -44,10 +44,8 @@ jobs:
             curl \
             ca-certificates \
             cmake \
-            libx11-dev \
             libxcb1-dev \
             libxkbcommon-dev \
-            libssl-dev \
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev \
             libpulse-dev \
@@ -108,7 +106,7 @@ jobs:
         run: |
           mkdir -p release-files
           cp artifacts/ivnc-amd64/ivnc-linux-amd64 release-files/ || true
-          # cp artifacts/ivnc-arm64/ivnc-linux-arm64 release-files/ || true
+          cp artifacts/ivnc-arm64/ivnc-linux-arm64 release-files/ || true
           chmod +x release-files/* || true
           echo "Release files:"
           ls -lh release-files/
@@ -160,23 +158,30 @@ jobs:
             | 架构 | 文件名 |
             |------|--------|
             | AMD64 | `ivnc-linux-amd64` |
+            | ARM64 | `ivnc-linux-arm64` |
 
             ---
 
             ### 快速安装
 
             ```bash
+            # AMD64
             wget https://github.com/${{ github.repository }}/releases/download/latest/ivnc-linux-amd64 -O ivnc
+            # ARM64
+            # wget https://github.com/${{ github.repository }}/releases/download/latest/ivnc-linux-arm64 -O ivnc
             chmod +x ivnc
             ```
 
             ### 运行时依赖
 
             ```bash
-            apt-get install libx11-6 libxcb1 \
+            apt-get install \
+              libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
+              libpixman-1-0 libxkbcommon0 \
               gstreamer1.0-tools gstreamer1.0-plugins-base \
               gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-              gstreamer1.0-plugins-ugly gstreamer1.0-x
+              gstreamer1.0-plugins-ugly gstreamer1.0-x \
+              libpulse0 libopus0 pulseaudio pulseaudio-utils
             ```
 
           files: release-files/*
