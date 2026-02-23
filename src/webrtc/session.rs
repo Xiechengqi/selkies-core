@@ -56,6 +56,7 @@ pub struct SessionManager {
 /// A pending session wraps an RtcSession with a creation timestamp for TTL cleanup.
 struct PendingSession {
     session: RtcSession,
+    candidate_addr: SocketAddr,
     created_at: Instant,
 }
 
@@ -131,6 +132,7 @@ impl SessionManager {
         }
         pending.insert(session_id.clone(), PendingSession {
             session,
+            candidate_addr,
             created_at: Instant::now(),
         });
         self.shared_state.increment_webrtc_sessions();
@@ -165,7 +167,7 @@ impl SessionManager {
         &self,
         tcp_stream: TcpStream,
         peer_addr: SocketAddr,
-        local_addr: SocketAddr,
+        _local_addr: SocketAddr,
         first_packet: &[u8],
     ) -> Result<(), WebRTCError> {
         // Decode RFC 4571 framing — the raw TCP data has a 2-byte length prefix
@@ -194,7 +196,7 @@ impl SessionManager {
             let recv = str0m::net::Receive {
                 proto: str0m::net::Protocol::Tcp,
                 source: peer_addr,
-                destination: local_addr,
+                destination: ps.candidate_addr,
                 contents: match (&*ice_pkt).try_into() {
                     Ok(c) => c,
                     Err(_) => continue,
@@ -211,7 +213,9 @@ impl SessionManager {
             WebRTCError::SessionNotFound("No session accepts this TCP connection".to_string())
         })?;
 
-        let mut session = pending.remove(&session_id).unwrap().session;
+        let ps = pending.remove(&session_id).unwrap();
+        let mut session = ps.session;
+        let candidate_addr = ps.candidate_addr;
         drop(pending);
 
         info!("Session {} matched TCP connection from {}", session_id, peer_addr);
@@ -220,7 +224,7 @@ impl SessionManager {
         let recv = str0m::net::Receive {
             proto: str0m::net::Protocol::Tcp,
             source: peer_addr,
-            destination: local_addr,
+            destination: candidate_addr,
             contents: (&*ice_pkt).try_into()
                 .map_err(|e| WebRTCError::ConnectionFailed(format!("First packet parse: {}", e)))?,
         };
@@ -243,7 +247,7 @@ impl SessionManager {
                 session,
                 tcp_stream,
                 peer_addr,
-                local_addr,
+                candidate_addr,
                 shared_state,
                 input_tx,
                 upload_handler,

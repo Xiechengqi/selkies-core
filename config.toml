@@ -74,12 +74,21 @@ format = "json"
 #
 # iVnc uses str0m ICE-lite with TCP transport. All WebRTC traffic (signaling,
 # media, data channels) flows through the same HTTP port via protocol splitting.
-# No STUN/TURN servers are required for typical deployments.
+# TCP-only mode; no additional relay or traversal servers are used.
 # ============================================================================
 
 [webrtc]
 # Enable WebRTC streaming
 enabled = true
+
+# TCP-only mode (required)
+tcp_only = true
+
+# Public candidate address for ICE-TCP (recommended for public access)
+# public_candidate = "1.2.3.4:8008"
+
+# Allow candidate override from Host header
+candidate_from_host_header = true
 
 # Video codec: "h264", "vp8", "vp9", "av1"
 video_codec = "h264"
@@ -95,14 +104,3 @@ pipeline_latency_ms = 50
 
 # Keyframe interval in frames (lower = more keyframes = better error recovery)
 keyframe_interval = 60
-
-# Optional STUN/TURN servers for browser ICE candidates (usually not needed
-# with ICE-TCP, but can be configured as fallback for restrictive networks)
-# stun_host = "stun.l.google.com"
-# stun_port = 19302
-# turn_host = ""
-# turn_port = 3478
-# turn_protocol = "udp"
-# turn_tls = false
-# turn_username = ""
-# turn_password = ""

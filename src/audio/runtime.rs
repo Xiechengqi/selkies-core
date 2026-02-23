@@ -2,7 +2,7 @@
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 
 /// Audio configuration
 #[derive(Debug, Clone)]
@@ -36,7 +36,7 @@ pub struct AudioPacket {
 #[cfg(all(not(feature = "audio"), not(feature = "pulseaudio")))]
 pub fn run_audio_capture(
     config: AudioConfig,
-    _sender: broadcast::Sender<AudioPacket>,
+    _sender: mpsc::UnboundedSender<AudioPacket>,
     running: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _ = (config.sample_rate, config.channels, config.bitrate);
@@ -49,7 +49,7 @@ pub fn run_audio_capture(
 #[cfg(all(feature = "audio", not(feature = "pulseaudio")))]
 pub fn run_audio_capture(
     config: AudioConfig,
-    sender: broadcast::Sender<AudioPacket>,
+    sender: mpsc::UnboundedSender<AudioPacket>,
     running: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -219,7 +219,7 @@ fn detect_pulse_monitor_source() -> Option<String> {
 #[cfg(feature = "pulseaudio")]
 pub fn run_audio_capture(
     config: AudioConfig,
-    sender: broadcast::Sender<AudioPacket>,
+    sender: mpsc::UnboundedSender<AudioPacket>,
     running: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use libpulse_binding::sample::{Format, Spec};
@@ -296,7 +296,7 @@ fn encode_ready_frames(
     encoder: &mut opus::Encoder,
     buffer: &mut std::collections::VecDeque<i16>,
     samples_per_frame: usize,
-    sender: &broadcast::Sender<AudioPacket>,
+    sender: &mpsc::UnboundedSender<AudioPacket>,
 ) {
     while buffer.len() >= samples_per_frame {
         let frame: Vec<i16> = buffer.drain(..samples_per_frame).collect();

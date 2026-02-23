@@ -89,6 +89,13 @@ pub struct SharedState {
 
     /// Cached keyframe RTP packets for new session replay
     pub keyframe_cache: Arc<Mutex<Vec<Vec<u8>>>>,
+
+    /// Per-session mpsc senders for RTP (reliable cross-thread wakeup)
+    pub rtp_subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<Vec<u8>>>>>,
+    /// Per-session mpsc senders for audio
+    pub audio_subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<AudioPacket>>>>,
+    /// Per-session mpsc senders for text
+    pub text_subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<String>>>>,
 }
 
 impl std::fmt::Debug for SharedState {
@@ -140,6 +147,9 @@ impl SharedState {
             clipboard_incoming_tx,
             clipboard_incoming_rx: Arc::new(Mutex::new(clipboard_incoming_rx)),
             keyframe_cache: Arc::new(Mutex::new(Vec::new())),
+            rtp_subscribers: Arc::new(Mutex::new(Vec::new())),
+            audio_subscribers: Arc::new(Mutex::new(Vec::new())),
+            text_subscribers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -201,6 +211,12 @@ impl SharedState {
         self.last_cursor_message.lock().unwrap().clone()
     }
 
+    /// Send a text message to all sessions (via mpsc + broadcast)
+    pub fn send_text(&self, msg: String) {
+        self.broadcast_text(msg.clone());
+        let _ = self.text_sender.send(msg);
+    }
+
     /// Store clipboard and broadcast to clients
     pub fn set_clipboard(&self, base64_text: String) {
         let mut clipboard = self.clipboard.lock().unwrap();
@@ -208,43 +224,33 @@ impl SharedState {
         if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&base64_text) {
             let total_size = decoded.len();
             if total_size > 8192 {
-                let _ = self
-                    .text_sender
-                    .send(format!("clipboard_start,text/plain,{}", total_size));
+                self.send_text(format!("clipboard_start,text/plain,{}", total_size));
                 for chunk in decoded.chunks(4096) {
                     let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
-                    let _ = self
-                        .text_sender
-                        .send(format!("clipboard_data,{}", encoded));
+                    self.send_text(format!("clipboard_data,{}", encoded));
                 }
-                let _ = self.text_sender.send("clipboard_finish".to_string());
+                self.send_text("clipboard_finish".to_string());
                 return;
             }
         }
 
-        let _ = self.text_sender.send(format!("clipboard,{}", base64_text));
+        self.send_text(format!("clipboard,{}", base64_text));
     }
 
     /// Store binary clipboard and broadcast to clients
     pub fn set_clipboard_binary(&self, mime_type: String, data: Vec<u8>) {
         if data.len() > 8192 {
-            let _ = self
-                .text_sender
-                .send(format!("clipboard_start,{},{}", mime_type, data.len()));
+            self.send_text(format!("clipboard_start,{},{}", mime_type, data.len()));
             for chunk in data.chunks(4096) {
                 let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
-                let _ = self
-                    .text_sender
-                    .send(format!("clipboard_data,{}", encoded));
+                self.send_text(format!("clipboard_data,{}", encoded));
             }
-            let _ = self.text_sender.send("clipboard_finish".to_string());
+            self.send_text("clipboard_finish".to_string());
             return;
         }
 
         let encoded = base64::engine::general_purpose::STANDARD.encode(data);
-        let _ = self
-            .text_sender
-            .send(format!("clipboard_binary,{},{}", mime_type, encoded));
+        self.send_text(format!("clipboard_binary,{},{}", mime_type, encoded));
     }
 
     pub fn mark_clipboard_written(&self, mime_type: &str, data: &[u8]) {
@@ -376,7 +382,46 @@ impl SharedState {
 
     /// Broadcast an RTP packet to all WebRTC sessions
     pub fn broadcast_rtp(&self, packet: Vec<u8>) {
-        let _ = self.rtp_sender.send(packet);
+        let mut subs = self.rtp_subscribers.lock().unwrap();
+        subs.retain(|tx| tx.send(packet.clone()).is_ok());
+    }
+
+    /// Get current RTP subscriber count
+    pub fn rtp_receiver_count(&self) -> usize {
+        self.rtp_subscribers.lock().unwrap().len()
+    }
+
+    /// Subscribe to RTP packets via mpsc (reliable cross-thread wakeup)
+    pub fn subscribe_rtp_mpsc(&self) -> mpsc::UnboundedReceiver<Vec<u8>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.rtp_subscribers.lock().unwrap().push(tx);
+        rx
+    }
+
+    /// Subscribe to audio packets via mpsc
+    pub fn subscribe_audio_mpsc(&self) -> mpsc::UnboundedReceiver<AudioPacket> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.audio_subscribers.lock().unwrap().push(tx);
+        rx
+    }
+
+    /// Subscribe to text messages via mpsc
+    pub fn subscribe_text_mpsc(&self) -> mpsc::UnboundedReceiver<String> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.text_subscribers.lock().unwrap().push(tx);
+        rx
+    }
+
+    /// Broadcast audio to all subscribers
+    pub fn broadcast_audio(&self, packet: AudioPacket) {
+        let mut subs = self.audio_subscribers.lock().unwrap();
+        subs.retain(|tx| tx.send(packet.clone()).is_ok());
+    }
+
+    /// Broadcast text to all subscribers
+    pub fn broadcast_text(&self, msg: String) {
+        let mut subs = self.text_subscribers.lock().unwrap();
+        subs.retain(|tx| tx.send(msg.clone()).is_ok());
     }
 
     /// Update the keyframe cache with a new set of RTP packets

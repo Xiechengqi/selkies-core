@@ -318,15 +318,21 @@ fn run(
     if config.audio.enabled {
         info!("Starting audio capture thread (rate={} ch={} bitrate={})",
             config.audio.sample_rate, config.audio.channels, config.audio.bitrate);
-        let st = shared_state.clone();
         let r = running.clone();
         let ac = config.audio.clone();
+        let (audio_tx, mut audio_rx) = mpsc::unbounded_channel();
+        let st = shared_state.clone();
+        tokio_rt.spawn(async move {
+            while let Some(pkt) = audio_rx.recv().await {
+                st.broadcast_audio(pkt);
+            }
+        });
         std::thread::Builder::new().name("audio-capture".into()).spawn(move || {
             info!("Audio capture thread started");
             let rt_audio = RuntimeAudioConfig {
                 sample_rate: ac.sample_rate, channels: ac.channels, bitrate: ac.bitrate,
             };
-            match run_audio_capture(rt_audio, st.audio_sender.clone(), r) {
+            match run_audio_capture(rt_audio, audio_tx, r) {
                 Ok(()) => info!("Audio capture thread exited normally"),
                 Err(e) => warn!("Audio capture ended with error: {}", e),
             }
@@ -447,10 +453,8 @@ fn run(
                                 let encoded = base64::engine::general_purpose::STANDARD.encode(&text);
                                 let msg = format!("clipboard,{}", encoded);
                                 info!("Clipboard from remote app: {} bytes", text.len());
-                                match shared_state.text_sender.send(msg) {
-                                    Ok(n) => info!("Clipboard broadcast to {} receivers", n),
-                                    Err(e) => warn!("Clipboard broadcast failed: {}", e),
-                                }
+                                shared_state.send_text(msg);
+                                info!("Clipboard broadcast to remote");
                             }
                         }
                         clipboard_pipe_buf.clear();
@@ -483,7 +487,7 @@ fn run(
         if cursor_name != prev_cursor_name {
             info!("Cursor changed: {} -> {}", prev_cursor_name, cursor_name);
             let msg = format!("cursor,{{\"override\":\"{}\"}}", cursor_name);
-            let _ = shared_state.text_sender.send(msg);
+            shared_state.send_text(msg);
             prev_cursor_name = cursor_name;
         }
 
@@ -551,7 +555,7 @@ fn run(
                 prev_taskbar_json = json.clone();
                 let msg = format!("taskbar,{}", json);
                 info!("Taskbar broadcast: {}", msg);
-                let _ = shared_state.text_sender.send(msg);
+                shared_state.send_text(msg);
             }
         }
 
@@ -623,7 +627,7 @@ fn run(
         // Render + encode if any client committed new content
         // Also force periodic renders when sessions are active to ensure
         // the browser always has decodable video frames.
-        let has_sessions = shared_state.text_sender.receiver_count() > 0;
+        let has_sessions = shared_state.rtp_receiver_count() > 0;
         if !comp.needs_redraw && has_sessions && last_render.elapsed() >= Duration::from_secs(1) {
             comp.needs_redraw = true;
         }
@@ -666,11 +670,11 @@ fn run(
                 stats.total_frames += frame_count;
                 stats.total_bytes += byte_count;
             }
-            let _ = shared_state.text_sender.send(
+            shared_state.send_text(
                 format!("stats,{}", shared_state.stats_json()),
             );
             // Re-broadcast cursor state so newly connected sessions get it
-            let _ = shared_state.text_sender.send(
+            shared_state.send_text(
                 format!("cursor,{{\"override\":\"{}\"}}", prev_cursor_name),
             );
             render_frames = 0;
@@ -787,7 +791,7 @@ fn drain_input_events(
                 info!("Keyboard reset: released all modifier keys");
             }
             InputEvent::Ping => {
-                let _ = shared.text_sender.send("pong".to_string());
+                shared.send_text("pong".to_string());
             }
             InputEvent::TextInput => {
                 inject_text(state, &ev);
@@ -1114,13 +1118,10 @@ fn flush_frame(
             }
         }
 
-        if *rtp_count < 5 {
-            log::info!("RTP pkt #{}: {} bytes, kf={}, marker={}, first16={:02x?}",
-                *rtp_count, data.len(), is_kf,
-                data.len() >= 2 && (data[1] & 0x80) != 0,
-                &data[..data.len().min(16)]);
-        }
         *rtp_count += 1;
+        if *rtp_count <= 3 || *rtp_count % 500 == 0 {
+            log::info!("broadcast_rtp #{} receivers={}", *rtp_count, shared.rtp_receiver_count());
+        }
         shared.broadcast_rtp(data);
     }
 }
