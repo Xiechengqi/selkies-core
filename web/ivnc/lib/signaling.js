@@ -188,6 +188,9 @@ export class WebRTCDemoSignaling {
         this._ws_conn.send(`HELLO ${this.peer_id}`);
         this._setStatus("Registering with server, peer ID: " + this.peer_id);
         this.retry_count = 0;
+
+        // Start WebSocket keepalive to prevent TCP proxy idle timeout
+        this._startKeepalive();
     }
 
     /**
@@ -286,6 +289,7 @@ export class WebRTCDemoSignaling {
      * @event
      */
     _onServerClose(event) {
+        this._stopKeepalive();
         if (this.state !== 'connecting') {
             this.state = 'disconnected';
             this._setError("Server closed connection.");
@@ -324,7 +328,36 @@ export class WebRTCDemoSignaling {
      * Triggers onServerClose event.
      */
     disconnect() {
+        this._stopKeepalive();
         this._ws_conn.close();
+    }
+
+    /**
+     * Start periodic WebSocket ping to prevent TCP proxy idle timeout.
+     * @private
+     */
+    _startKeepalive() {
+        this._stopKeepalive();
+        this._keepaliveInterval = setInterval(() => {
+            if (this._ws_conn && this._ws_conn.readyState === WebSocket.OPEN) {
+                try {
+                    this._ws_conn.send('{"type":"ping","timestamp":' + Math.floor(Date.now() / 1000) + '}');
+                } catch (e) {
+                    // ignore send errors on closing socket
+                }
+            }
+        }, 15000);
+    }
+
+    /**
+     * Stop the WebSocket keepalive timer.
+     * @private
+     */
+    _stopKeepalive() {
+        if (this._keepaliveInterval) {
+            clearInterval(this._keepaliveInterval);
+            this._keepaliveInterval = null;
+        }
     }
 
     /**

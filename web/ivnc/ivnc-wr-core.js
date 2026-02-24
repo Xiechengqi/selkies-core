@@ -319,6 +319,8 @@ export default function webrtc() {
 	var videoConnected = "";
 	var audioConnected = "";
 	var statWatchEnabled = false;
+	var statsLoopId = null;
+	var metricsLoopId = null;
 	var webrtc = null;
 	var input = null;
 	let useCssScaling = true;
@@ -1033,6 +1035,11 @@ export default function webrtc() {
 
 	// TODO: How do we want to render rudimentary metrics?
 	function enableStatWatch() {
+		// Clear any previous stats loop to prevent timer leaks on reconnect
+		if (statsLoopId) {
+			clearInterval(statsLoopId);
+			statsLoopId = null;
+		}
 		// Start watching stats
 		var videoBytesReceivedStart = 0;
 		var audioBytesReceivedStart = 0;
@@ -1041,7 +1048,7 @@ export default function webrtc() {
 		var previousAudioJitterBufferDelay = 0.0;
 		var previousAudioJitterBufferEmittedCount = 0;
 		var statsStart = new Date().getTime() / 1000;
-		var statsLoop = setInterval(async () => {
+		statsLoopId = setInterval(async () => {
 			webrtc.getConnectionStats().then((stats) => {
 				statWatchEnabled = true;
 				var now = new Date().getTime() / 1000;
@@ -1417,8 +1424,18 @@ export default function webrtc() {
 			signaling.ondisconnect = (reconnect) => {
 				videoElement.style.cursor = "auto";
 				if (reconnect) {
-					status = 'connecting';
-					webrtc.reset();
+					// If WebRTC media is already flowing, don't tear it down
+					// just because the signaling WebSocket was closed by a proxy.
+					// Only reset when the peer connection is actually dead.
+					var pc = webrtc.peerConnection;
+					if (pc && (pc.connectionState === 'connected' || pc.connectionState === 'connecting')) {
+						console.log("[signaling] WebSocket closed but WebRTC still alive, reconnecting signaling only");
+						status = 'connected';
+						signaling.connect();
+					} else {
+						status = 'connecting';
+						webrtc.reset();
+					}
 				} else {
 					status = 'disconnected';
 				}
@@ -1480,7 +1497,10 @@ export default function webrtc() {
 				}
 
 				// Send client-side metrics over data channel every 5 seconds
-				setInterval(async () => {
+				if (metricsLoopId) {
+					clearInterval(metricsLoopId);
+				}
+				metricsLoopId = setInterval(async () => {
 					if (connectionStat.connectionFrameRate === parseInt(connectionStat.connectionFrameRate, 10))webrtc.sendDataChannelMessage(`_f,${connectionStat.connectionFrameRate}`);
 					if (connectionStat.connectionLatency === parseInt(connectionStat.connectionLatency, 10)) webrtc.sendDataChannelMessage(`_l,${connectionStat.connectionLatency}`);
 				}, 5000)
@@ -1780,6 +1800,8 @@ export default function webrtc() {
 			videoConnected = "";
 			audioConnected = "";
 			statWatchEnabled = false;
+			if (statsLoopId) { clearInterval(statsLoopId); statsLoopId = null; }
+			if (metricsLoopId) { clearInterval(metricsLoopId); metricsLoopId = null; }
 			webrtc = null;
 			input = null;
 			useCssScaling = true;
