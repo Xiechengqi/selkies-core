@@ -1106,7 +1106,33 @@ export default function webrtc() {
 				window.fps = connectionStat.connectionFrameRate
 
 				if (webrtc._send_channel !== null && webrtc._send_channel.readyState === 'open') {
-					webrtc.sendDataChannelMessage(`_stats_video,${JSON.stringify(stats.allReports)}`);
+					// Send compact stats summary instead of full allReports
+					// (allReports can be 5-15KB, exceeding DTLS/SCTP frame limits)
+					var summary = {
+						video: {
+							bytesReceived: stats.video.bytesReceived,
+							packetsReceived: stats.video.packetsReceived,
+							packetsLost: stats.video.packetsLost,
+							framesPerSecond: stats.video.framesPerSecond,
+							frameWidth: stats.video.frameWidth,
+							frameHeight: stats.video.frameHeight,
+							codecName: stats.video.codecName,
+							decoder: stats.video.decoder,
+						},
+						audio: {
+							bytesReceived: stats.audio.bytesReceived,
+							packetsReceived: stats.audio.packetsReceived,
+							packetsLost: stats.audio.packetsLost,
+							codecName: stats.audio.codecName,
+						},
+						general: {
+							bytesReceived: stats.general.bytesReceived,
+							bytesSent: stats.general.bytesSent,
+							currentRoundTripTime: stats.general.currentRoundTripTime,
+							connectionType: stats.general.connectionType,
+						}
+					};
+					webrtc.sendDataChannelMessage(`_stats_video,${JSON.stringify(summary)}`);
 				}
 			});
 		// Stats refresh interval (1000 ms)

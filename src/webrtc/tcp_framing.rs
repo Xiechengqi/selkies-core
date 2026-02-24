@@ -16,7 +16,10 @@ pub fn frame_packet(data: &[u8]) -> Vec<u8> {
 }
 
 /// Maximum allowed RFC 4571 frame size (bytes).
-pub const MAX_RFC4571_FRAME: usize = 4096;
+/// DTLS records can be up to ~16KB, and SCTP messages carrying large
+/// DataChannel payloads may exceed 4KB.  Use the full u16 range to
+/// avoid spurious FrameTooLarge disconnects.
+pub const MAX_RFC4571_FRAME: usize = 65535;
 
 #[derive(Debug)]
 pub enum TcpFrameError {

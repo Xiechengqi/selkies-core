@@ -246,7 +246,7 @@ async fn handle_ice_connection(
 ) {
     if let Some(sm) = sm {
         let ice_local_addr = sm.listen_addr();
-        let mut buf = vec![0u8; 4096];
+        let mut buf = vec![0u8; 8192];
         match stream.read(&mut buf).await {
             Ok(0) => return,
             Ok(n) => {

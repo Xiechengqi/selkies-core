@@ -364,10 +364,11 @@ export class WebRTCDemo {
 	_rewriteCandidateHost(sdpText) {
 		var host = window.location.hostname;
 		if (!host) return sdpText;
-		// Replace IP addresses in a=candidate lines with the browser's host
+		var port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+		// Replace IP and port in a=candidate lines with the browser's host/port
 		return sdpText.replace(
-			/^(a=candidate:\S+ \d+ (?:tcp|TCP) \d+ )(\S+)( \d+ typ host.*)/gm,
-			'$1' + host + '$3'
+			/^(a=candidate:\S+ \d+ (?:tcp|TCP) \d+ )(\S+) (\d+)( typ host.*)/gm,
+			'$1' + host + ' ' + port + '$4'
 		);
 	}
 
