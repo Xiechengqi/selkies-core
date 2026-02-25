@@ -262,8 +262,159 @@ function InitUI() {
 	.taskbar-item.focused .taskbar-close {
 		display: inline-block;
 	}
+	.pwd-overlay {
+		position: fixed;
+		inset: 0;
+		background: rgba(0,0,0,0.6);
+		z-index: 2000;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+	.pwd-dialog {
+		background: #1e1e1e;
+		border: 1px solid #444;
+		border-radius: 8px;
+		padding: 24px;
+		min-width: 300px;
+		color: #eee;
+		font-family: system-ui, sans-serif;
+	}
+	.pwd-dialog h3 {
+		margin: 0 0 16px;
+		font-size: 15px;
+		font-weight: 600;
+	}
+	.pwd-dialog input {
+		display: block;
+		width: 100%;
+		padding: 8px;
+		margin-bottom: 10px;
+		border: 1px solid #555;
+		border-radius: 4px;
+		background: #2a2a2a;
+		color: #eee;
+		font-size: 13px;
+		box-sizing: border-box;
+	}
+	.pwd-dialog input:focus {
+		outline: none;
+		border-color: #4c86e6;
+	}
+	.pwd-dialog .pwd-btns {
+		display: flex;
+		justify-content: flex-end;
+		gap: 8px;
+		margin-top: 14px;
+	}
+	.pwd-dialog button {
+		padding: 6px 16px;
+		border: none;
+		border-radius: 4px;
+		font-size: 13px;
+		cursor: pointer;
+	}
+	.pwd-dialog .pwd-cancel {
+		background: #444;
+		color: #ccc;
+	}
+	.pwd-dialog .pwd-cancel:hover {
+		background: #555;
+	}
+	.pwd-dialog .pwd-ok {
+		background: #4c86e6;
+		color: #fff;
+	}
+	.pwd-dialog .pwd-ok:hover {
+		background: #5a94f0;
+	}
+	.pwd-msg {
+		font-size: 12px;
+		margin-top: 8px;
+		min-height: 16px;
+	}
+	.pwd-msg.error { color: #e85959; }
+	.pwd-msg.ok { color: #5cb85c; }
 	`;
   document.head.appendChild(style);
+}
+
+function showChangePasswordModal() {
+	// Remove existing modal if any
+	const existing = document.querySelector('.pwd-overlay');
+	if (existing) existing.remove();
+
+	const overlay = document.createElement('div');
+	overlay.className = 'pwd-overlay';
+
+	const dialog = document.createElement('div');
+	dialog.className = 'pwd-dialog';
+	dialog.innerHTML = `
+		<h3>修改密码</h3>
+		<input type="password" id="pwd-new" placeholder="新密码 (至少4位)" autocomplete="new-password" />
+		<input type="password" id="pwd-confirm" placeholder="确认新密码" autocomplete="new-password" />
+		<div class="pwd-msg" id="pwd-msg"></div>
+		<div class="pwd-btns">
+			<button class="pwd-cancel" id="pwd-cancel">取消</button>
+			<button class="pwd-ok" id="pwd-ok">确定</button>
+		</div>
+	`;
+	overlay.appendChild(dialog);
+	document.body.appendChild(overlay);
+
+	const newInput = document.getElementById('pwd-new');
+	const confirmInput = document.getElementById('pwd-confirm');
+	const msg = document.getElementById('pwd-msg');
+	const okBtn = document.getElementById('pwd-ok');
+	const cancelBtn = document.getElementById('pwd-cancel');
+
+	newInput.focus();
+
+	const close = () => overlay.remove();
+	overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+	cancelBtn.addEventListener('click', close);
+
+	okBtn.addEventListener('click', async () => {
+		const np = newInput.value;
+		const cp = confirmInput.value;
+		msg.className = 'pwd-msg';
+		msg.textContent = '';
+
+		if (np.length < 4) {
+			msg.className = 'pwd-msg error';
+			msg.textContent = '密码至少需要4个字符';
+			return;
+		}
+		if (np !== cp) {
+			msg.className = 'pwd-msg error';
+			msg.textContent = '两次输入的密码不一致';
+			return;
+		}
+
+		okBtn.disabled = true;
+		okBtn.textContent = '...';
+		try {
+			const resp = await fetch('/api/change-password', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ new_password: np }),
+			});
+			if (resp.ok) {
+				msg.className = 'pwd-msg ok';
+				msg.textContent = '密码已修改，下次请求将使用新密码';
+				setTimeout(close, 1500);
+			} else {
+				const data = await resp.json().catch(() => ());
+				msg.className = 'pwd-msg error';
+				msg.textContent = data.error || '修改失败';
+			}
+		} catch (e) {
+			msg.className = 'pwd-msg error';
+			msg.textContent = '网络错误';
+		}
+		okBtn.disabled = false;
+		okBtn.textContent = '确定';
+	});
 }
 
 export default function webrtc() {
@@ -1303,6 +1454,18 @@ export default function webrtc() {
 				}
 			});
 			taskbar.appendChild(imeBtn);
+
+			// Change password button
+			const pwdSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`;
+			const pwdBtn = document.createElement('div');
+			pwdBtn.className = 'taskbar-pin';
+			pwdBtn.innerHTML = pwdSvg;
+			pwdBtn.title = '修改密码';
+			pwdBtn.addEventListener('click', (e) => {
+				e.stopPropagation();
+				showChangePasswordModal();
+			});
+			taskbar.appendChild(pwdBtn);
 
 			const connIndicator = document.createElement('div');
 			connIndicator.className = 'taskbar-conn';

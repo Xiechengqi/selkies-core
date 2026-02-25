@@ -17,7 +17,7 @@ use axum::{
     http::{header, Request, StatusCode, Uri},
     middleware,
     response::Response,
-    routing::get,
+    routing::{get, post},
     Router,
 };
 
@@ -89,6 +89,7 @@ pub async fn run_http_server_with_webrtc(
         .route("/clients", get(clients_handler))
         .route("/ui-config", get(ui_config_handler))
         .route("/ws-config", get(ws_config_handler))
+        .route("/api/change-password", post(change_password_handler))
         ;
 
     // Add WebRTC signaling endpoint if session manager is provided
@@ -361,6 +362,15 @@ async fn basic_auth_middleware(
         return next.run(req).await;
     }
 
+    // Read password override; clone to release the RwLock guard immediately
+    let expected_password = {
+        let guard = state.password_override.read().await;
+        match guard.as_deref() {
+            Some(overridden) => overridden.to_string(),
+            None => state.config.http.basic_auth_password.clone(),
+        }
+    };
+
     match req.headers().get(header::AUTHORIZATION) {
         Some(value) => {
             if let Ok(value_str) = value.to_str() {
@@ -369,7 +379,7 @@ async fn basic_auth_middleware(
                         if let Ok(decoded_str) = String::from_utf8(decoded) {
                             if let Some((user, pass)) = decoded_str.split_once(':') {
                                 if user == state.config.http.basic_auth_user
-                                    && pass == state.config.http.basic_auth_password
+                                    && pass == expected_password
                                 {
                                     return next.run(req).await;
                                 }
@@ -454,4 +464,39 @@ async fn index_handler(State(_state): State<Arc<SharedState>>) -> Response {
 /// Handler for serving embedded static files
 async fn embedded_fallback_handler(uri: Uri) -> Response {
     get_embedded_file(uri.path())
+}
+
+/// Change password handler
+async fn change_password_handler(
+    State(state): State<Arc<SharedState>>,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+) -> Response {
+    let new_password = match body.get("new_password").and_then(|v| v.as_str()) {
+        Some(p) => p,
+        None => {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"error":"missing new_password field"}"#))
+                .unwrap();
+        }
+    };
+
+    if new_password.len() < 4 {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"error":"password must be at least 4 characters"}"#))
+            .unwrap();
+    }
+
+    let mut pw = state.password_override.write().await;
+    *pw = Some(new_password.to_string());
+    info!("Password changed via /api/change-password");
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"ok":true}"#))
+        .unwrap()
 }

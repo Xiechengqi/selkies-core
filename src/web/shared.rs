@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
+use tokio::sync::RwLock;
 
 
 /// Shared state for the application
@@ -96,6 +97,9 @@ pub struct SharedState {
     pub audio_subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<AudioPacket>>>>,
     /// Per-session mpsc senders for text
     pub text_subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<String>>>>,
+
+    /// Password override (set via /api/change-password, takes precedence over config)
+    pub password_override: Arc<RwLock<Option<String>>>,
 }
 
 impl std::fmt::Debug for SharedState {
@@ -150,6 +154,7 @@ impl SharedState {
             rtp_subscribers: Arc::new(Mutex::new(Vec::new())),
             audio_subscribers: Arc::new(Mutex::new(Vec::new())),
             text_subscribers: Arc::new(Mutex::new(Vec::new())),
+            password_override: Arc::new(RwLock::new(None)),
         }
     }
 
