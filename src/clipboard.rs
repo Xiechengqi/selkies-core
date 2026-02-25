@@ -6,6 +6,8 @@ use base64::Engine;
 use log::{info, warn};
 use std::sync::Arc;
 
+const MAX_CLIPBOARD_BYTES: usize = 16 * 1024 * 1024;
+
 pub struct ClipboardReceiver {
     state: Arc<SharedState>,
     buffer: Option<Vec<u8>>,
@@ -73,6 +75,10 @@ impl ClipboardReceiver {
     fn handle_single_text(&self, base64_payload: &str) {
         match decode_base64(base64_payload) {
             Some(bytes) => {
+                if bytes.len() > MAX_CLIPBOARD_BYTES {
+                    warn!("Clipboard payload exceeds limit ({} bytes)", bytes.len());
+                    return;
+                }
                 let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
                 let _ = self.state.clipboard_incoming_tx.send(encoded.clone());
                 self.state.set_clipboard(encoded);
@@ -91,6 +97,10 @@ impl ClipboardReceiver {
         let b64 = parts.next().unwrap_or_default();
         match decode_base64(b64) {
             Some(bytes) => {
+                if bytes.len() > MAX_CLIPBOARD_BYTES {
+                    warn!("Clipboard payload exceeds limit ({} bytes)", bytes.len());
+                    return;
+                }
                 if system_clipboard::write(mime, &bytes) {
                     self.state.mark_clipboard_written(mime, &bytes);
                 }
@@ -108,6 +118,10 @@ impl ClipboardReceiver {
                 return;
             }
         };
+        if total_size == 0 || total_size > MAX_CLIPBOARD_BYTES {
+            warn!("Multipart clipboard size {} exceeds limit", total_size);
+            return;
+        }
         self.buffer = Some(Vec::with_capacity(total_size));
         self.total_size = total_size;
         self.mime_type = mime.to_string();
@@ -134,6 +148,11 @@ impl ClipboardReceiver {
         }
         if let Some(chunk) = decode_base64(base64_payload) {
             if let Some(buffer) = self.buffer.as_mut() {
+                if buffer.len().saturating_add(chunk.len()) > self.total_size {
+                    warn!("Clipboard chunk exceeds declared size; aborting transfer");
+                    self.reset();
+                    return;
+                }
                 buffer.extend_from_slice(&chunk);
             }
         } else {

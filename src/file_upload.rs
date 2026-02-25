@@ -36,6 +36,8 @@ pub struct FileUploadHandler {
     settings: FileUploadSettings,
     active_path: Option<PathBuf>,
     active_file: Option<File>,
+    expected_size: Option<u64>,
+    written_size: u64,
 }
 
 impl FileUploadHandler {
@@ -44,6 +46,8 @@ impl FileUploadHandler {
             settings,
             active_path: None,
             active_file: None,
+            expected_size: None,
+            written_size: 0,
         }
     }
 
@@ -64,6 +68,7 @@ impl FileUploadHandler {
             let size = parts.next().unwrap_or_default();
             if let Err(err) = self.start_upload(rel_path, size) {
                 error!("File upload start failed: {}", err);
+                self.abort_active();
             }
             return true;
         }
@@ -94,6 +99,18 @@ impl FileUploadHandler {
         }
         let payload = &data[1..];
         if let Some(file) = self.active_file.as_mut() {
+            if let Some(expected) = self.expected_size {
+                let next = self.written_size.saturating_add(payload.len() as u64);
+                if next > expected {
+                    error!(
+                        "Upload exceeded declared size (expected {}, got {})",
+                        expected,
+                        next
+                    );
+                    self.abort_active();
+                    return;
+                }
+            }
             if let Err(err) = file.write_all(payload) {
                 error!(
                     "File write error for {:?}: {}",
@@ -101,7 +118,9 @@ impl FileUploadHandler {
                     err
                 );
                 self.abort_active();
+                return;
             }
+            self.written_size = self.written_size.saturating_add(payload.len() as u64);
         } else {
             warn!("Received file data after upload path is closed");
         }
@@ -118,6 +137,8 @@ impl FileUploadHandler {
                 info!("Purged incomplete upload {:?}", path);
             }
         }
+        self.expected_size = None;
+        self.written_size = 0;
     }
 
     pub fn finish_upload(&mut self) {
@@ -127,8 +148,24 @@ impl FileUploadHandler {
             }
         }
         if let Some(path) = self.active_path.take() {
-            info!("Upload finished: {:?}", path);
+            if let Some(expected) = self.expected_size {
+                if self.written_size != expected {
+                    warn!(
+                        "Upload size mismatch for {:?}: expected {}, got {}",
+                        path,
+                        expected,
+                        self.written_size
+                    );
+                    let _ = fs::remove_file(&path);
+                } else {
+                    info!("Upload finished: {:?}", path);
+                }
+            } else {
+                info!("Upload finished: {:?}", path);
+            }
         }
+        self.expected_size = None;
+        self.written_size = 0;
     }
 
     fn is_upload_allowed(&self) -> bool {
@@ -142,7 +179,17 @@ impl FileUploadHandler {
             .as_ref()
             .ok_or_else(|| "Upload directory is not configured".to_string())?;
 
-        let _ = size_str.trim().parse::<u64>().map_err(|_| "Invalid file size")?;
+        let size = size_str
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| "Invalid file size")?;
+        if size == 0 {
+            return Err("Invalid file size".to_string());
+        }
+        const MAX_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
+        if size > MAX_UPLOAD_BYTES {
+            return Err(format!("Upload exceeds size limit ({} bytes)", MAX_UPLOAD_BYTES));
+        }
 
         let safe_rel = sanitize_relative_path(rel_path)
             .ok_or_else(|| format!("Invalid relative path: {}", rel_path))?;
@@ -167,6 +214,22 @@ impl FileUploadHandler {
             }
         }
 
+        let root_canon = fs::canonicalize(&upload_root)
+            .map_err(|err| format!("Failed to canonicalize upload root {:?}: {}", upload_root, err))?;
+        let target_dir_canon = fs::canonicalize(&target_dir)
+            .map_err(|err| format!("Failed to canonicalize upload target {:?}: {}", target_dir, err))?;
+        if !target_dir_canon.starts_with(&root_canon) {
+            return Err(format!(
+                "Path escape attempt detected via symlink: {:?} is outside {:?}",
+                target_dir_canon, root_canon
+            ));
+        }
+        if let Ok(meta) = fs::symlink_metadata(&target_path) {
+            if meta.file_type().is_symlink() {
+                return Err(format!("Refusing to follow symlink target {:?}", target_path));
+            }
+        }
+
         if self.active_file.is_some() {
             warn!("Closing previous upload before starting new one");
             self.finish_upload();
@@ -176,6 +239,8 @@ impl FileUploadHandler {
             .map_err(|err| format!("Failed to create upload file {:?}: {}", target_path, err))?;
         self.active_file = Some(file);
         self.active_path = Some(target_path.clone());
+        self.expected_size = Some(size);
+        self.written_size = 0;
         info!("Upload started: {:?}", target_path);
         Ok(())
     }

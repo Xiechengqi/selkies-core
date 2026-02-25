@@ -26,6 +26,8 @@ use log::{info, warn, debug};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
+#[cfg(feature = "tls")]
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tower::Service;
 use tower_http::services::{ServeDir, ServeFile};
@@ -34,22 +36,53 @@ use serde_json::json;
 
 use crate::webrtc::SessionManager;
 
-/// Classify a TCP connection by its first byte.
-fn classify_first_byte(byte: u8) -> ConnectionType {
-    match byte {
-        // ICE: first byte 0x00-0x03
-        0x00..=0x03 => ConnectionType::IceTcp,
-        // DTLS: first byte 0x14-0x17 (ChangeCipherSpec, Alert, Handshake, ApplicationData)
-        0x14..=0x17 => ConnectionType::IceTcp,
-        // Everything else is HTTP (GET, POST, HEAD, DELETE, OPTIONS, CONNECT, TRACE, PUT, PATCH)
-        _ => ConnectionType::Http,
+/// Classify a TCP connection by its first bytes.
+fn classify_first_bytes(buf: &[u8]) -> ConnectionType {
+    if buf.is_empty() {
+        return ConnectionType::Unknown;
     }
+    if looks_like_http(buf) {
+        return ConnectionType::Http;
+    }
+    let b0 = buf[0];
+    // DTLS/TLS handshake record type (0x16) needs version disambiguation.
+    if b0 == 0x16 {
+        if buf.len() >= 2 {
+            let b1 = buf[1];
+            if b1 == 0x03 {
+                return ConnectionType::Tls; // TLS record
+            }
+            if b1 == 0xFE {
+                return ConnectionType::IceTcp; // DTLS record
+            }
+        }
+        // Ambiguous: default to ICE/DTLS to avoid misrouting DTLS to HTTPS.
+        return ConnectionType::IceTcp;
+    }
+    // ICE/DTLS record types (ChangeCipherSpec, Alert, Handshake, ApplicationData)
+    if (0x00..=0x03).contains(&b0) || (0x14..=0x17).contains(&b0) {
+        return ConnectionType::IceTcp;
+    }
+    ConnectionType::Unknown
+}
+
+fn looks_like_http(buf: &[u8]) -> bool {
+    const METHODS: [&[u8]; 9] = [
+        b"GET", b"POST", b"HEAD", b"PUT", b"PATCH", b"DELETE", b"OPTIONS", b"CONNECT", b"TRACE",
+    ];
+    if METHODS.iter().any(|m| buf.starts_with(m)) {
+        return true;
+    }
+    // If we only have a few bytes, treat an initial ASCII letter as a partial HTTP method.
+    buf.len() < 3 && buf.first().is_some_and(|b| b.is_ascii_alphabetic())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectionType {
     Http,
     IceTcp,
+    Tls,
+    Unknown,
 }
 
 /// Run the HTTP server with WebRTC signaling support and same-port ICE-TCP
@@ -175,25 +208,40 @@ pub async fn run_http_server_with_webrtc(
         let tls_acceptor = tls_acceptor.clone();
 
         tokio::spawn(async move {
-            let mut first_byte = [0u8; 1];
+            let mut first_bytes = vec![0u8; 8];
             let peek_result = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                tcp_stream.peek(&mut first_byte),
+                tcp_stream.peek(&mut first_bytes),
             ).await;
-            match peek_result {
+            let n = match peek_result {
                 Ok(Ok(0)) | Err(_) => return,
-                Ok(Ok(_)) => {}
+                Ok(Ok(n)) => n,
                 Ok(Err(e)) => {
                     debug!("Peek error from {}: {}", peer_addr, e);
                     return;
                 }
+            };
+            first_bytes.truncate(n);
+            // If we only got the first byte and it's a TLS/DTLS handshake marker,
+            // try a quick re-peek to disambiguate version (0x03 vs 0xFE).
+            if first_bytes.len() < 2 && first_bytes.first() == Some(&0x16) {
+                let mut retry_buf = vec![0u8; 8];
+                if let Ok(Ok(n2)) = tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    tcp_stream.peek(&mut retry_buf),
+                ).await {
+                    if n2 > 0 {
+                        retry_buf.truncate(n2);
+                        first_bytes = retry_buf;
+                    }
+                }
             }
+            let kind = classify_first_bytes(&first_bytes);
 
-            // In TLS mode: 0x16 = TLS ClientHello → do TLS handshake then serve HTTP
-            // ICE/DTLS bytes (0x00-0x03, 0x14-0x15, 0x17) go directly to ICE handler
+            // In TLS mode: disambiguate TLS vs DTLS by version bytes
             #[cfg(feature = "tls")]
             if let Some(ref acceptor) = tls_acceptor {
-                if first_byte[0] == 0x16 {
+                if kind == ConnectionType::Tls {
                     // TLS handshake
                     match acceptor.accept(tcp_stream).await {
                         Ok(tls_stream) => {
@@ -205,17 +253,30 @@ pub async fn run_http_server_with_webrtc(
                     }
                     return;
                 }
-                // Non-TLS byte: ICE-TCP
-                handle_ice_connection(tcp_stream, peer_addr, sm).await;
+                // Non-TLS: route HTTP if detected, otherwise ICE-TCP
+                match kind {
+                    ConnectionType::Http => {
+                        debug!("Rejecting plaintext HTTP on TLS port from {}", peer_addr);
+                        let body = "HTTPS required";
+                        let response = format!(
+                            "HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = tcp_stream.write_all(response.as_bytes()).await;
+                        let _ = tcp_stream.shutdown().await;
+                    }
+                    ConnectionType::IceTcp | ConnectionType::Unknown | ConnectionType::Tls => {
+                        handle_ice_connection(tcp_stream, peer_addr, sm).await;
+                    }
+                }
                 return;
             }
 
             // Non-TLS mode: original first-byte classification
-            match classify_first_byte(first_byte[0]) {
-                ConnectionType::IceTcp => {
-                    handle_ice_connection(tcp_stream, peer_addr, sm).await;
-                }
-                ConnectionType::Http => {
+            match kind {
+                ConnectionType::IceTcp => handle_ice_connection(tcp_stream, peer_addr, sm).await,
+                ConnectionType::Http | ConnectionType::Tls | ConnectionType::Unknown => {
                     serve_http(TokioIo::new(tcp_stream), app).await;
                 }
             }

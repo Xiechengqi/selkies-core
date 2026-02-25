@@ -1188,25 +1188,46 @@ export default function webrtc() {
 	}
 
 	// TODO: How do we want to render rudimentary metrics?
-	function enableStatWatch() {
-		// Clear any previous stats loop to prevent timer leaks on reconnect
-		if (statsLoopId) {
-			clearInterval(statsLoopId);
-			statsLoopId = null;
-		}
-		// Start watching stats
-		var videoBytesReceivedStart = 0;
-		var audioBytesReceivedStart = 0;
-		var previousVideoJitterBufferDelay = 0.0;
-		var previousVideoJitterBufferEmittedCount = 0;
-		var previousAudioJitterBufferDelay = 0.0;
-		var previousAudioJitterBufferEmittedCount = 0;
-		var statsStart = new Date().getTime() / 1000;
-		statsLoopId = setInterval(async () => {
-			webrtc.getConnectionStats().then((stats) => {
-				statWatchEnabled = true;
-				var now = new Date().getTime() / 1000;
-				connectionStat = {};
+		function enableStatWatch() {
+			// Clear any previous stats loop to prevent timer leaks on reconnect
+			if (statsLoopId) {
+				clearInterval(statsLoopId);
+				statsLoopId = null;
+			}
+			// Start watching stats
+			var videoBytesReceivedStart = 0;
+			var audioBytesReceivedStart = 0;
+			var previousVideoJitterBufferDelay = 0.0;
+			var previousVideoJitterBufferEmittedCount = 0;
+			var previousAudioJitterBufferDelay = 0.0;
+			var previousAudioJitterBufferEmittedCount = 0;
+			var statsStart = new Date().getTime() / 1000;
+			var lastSessionCount = null;
+			var sessionCountPending = false;
+
+			async function refreshSessionCount() {
+				if (sessionCountPending) return;
+				sessionCountPending = true;
+				try {
+					const resp = await fetch('/clients', { cache: 'no-store' });
+					if (resp.ok) {
+						const data = await resp.json();
+						if (typeof data.webrtc_sessions === 'number') {
+							lastSessionCount = data.webrtc_sessions;
+						}
+					}
+				} catch (err) {
+					// Ignore fetch errors; keep last known count.
+				} finally {
+					sessionCountPending = false;
+				}
+			}
+			statsLoopId = setInterval(async () => {
+				refreshSessionCount();
+				webrtc.getConnectionStats().then((stats) => {
+					statWatchEnabled = true;
+					var now = new Date().getTime() / 1000;
+					connectionStat = {};
 
 				// Connection latency in milliseconds
 				const rtt = (stats.general.currentRoundTripTime !== null) ? (stats.general.currentRoundTripTime * 1000.0) : (serverLatency)
@@ -1217,23 +1238,24 @@ export default function webrtc() {
 				connectionStat.connectionStatType = stats.general.connectionType
 
 				var connEl = document.getElementById('conn-indicator');
-				if (connEl) {
-					var ct = stats.general.connectionType;
-					if (ct === 'relay') {
-						connEl.textContent = 'RELAY';
-						connEl.style.color = '#f0a020';
-					} else if (ct === 'host') {
-						connEl.textContent = 'TCP';
-						connEl.style.color = '#4caf50';
-					} else if (ct && ct !== 'NA' && ct !== 'unknown') {
-						connEl.textContent = ct.toUpperCase();
-						connEl.style.color = '#4caf50';
-					} else {
-						connEl.textContent = '—';
-						connEl.style.color = 'rgba(255, 255, 255, 0.5)';
+					if (connEl) {
+						var ct = stats.general.connectionType;
+						if (ct === 'relay') {
+							connEl.textContent = 'RELAY';
+							connEl.style.color = '#f0a020';
+						} else if (ct === 'host') {
+							connEl.textContent = (lastSessionCount === null) ? 'TCP' : String(lastSessionCount);
+							connEl.style.color = '#4caf50';
+						} else if (ct && ct !== 'NA' && ct !== 'unknown') {
+							connEl.textContent = ct.toUpperCase();
+							connEl.style.color = '#4caf50';
+						} else {
+							connEl.textContent = '—';
+							connEl.style.color = 'rgba(255, 255, 255, 0.5)';
+						}
+						var countLabel = (lastSessionCount === null) ? '—' : String(lastSessionCount);
+						connEl.title = '连接模式: ' + (ct || 'unknown') + '  连接数: ' + countLabel;
 					}
-					connEl.title = '连接模式: ' + (ct || 'unknown');
-				}
 
 				connectionStat.connectionBytesReceived = (stats.general.bytesReceived * 1e-6).toFixed(2) + " MBytes";
 				connectionStat.connectionBytesSent = (stats.general.bytesSent * 1e-6).toFixed(2) + " MBytes";

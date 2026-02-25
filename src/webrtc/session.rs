@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, RwLock};
 
@@ -28,6 +28,12 @@ use str0m::{Input, Output};
 
 /// How long a pending session can wait for a TCP connection before being reaped.
 const PENDING_SESSION_TTL: Duration = Duration::from_secs(30);
+/// Max time to wait for a complete initial RFC 4571 frame.
+const INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
+/// Read chunk size while assembling the first RFC 4571 frame.
+const INITIAL_READ_CHUNK: usize = 1024;
+/// Upper bound on buffered bytes while waiting for the first frame.
+const MAX_INITIAL_BUFFER: usize = super::tcp_framing::MAX_RFC4571_FRAME * 2 + 2048;
 
 /// Session manager for handling multiple str0m WebRTC sessions.
 ///
@@ -116,7 +122,7 @@ impl SessionManager {
         // Determine the ICE candidate address.
         // If the browser connected via a tunnel/proxy, use the Host header
         // so the ICE-TCP candidate points to the same public address.
-        let candidate_addr = resolve_candidate_addr(&self.config, client_host, self.listen_addr);
+        let candidate_addr = resolve_candidate_addr(&self.config, client_host, self.listen_addr).await;
 
         // Add TCP passive candidate
         session.add_local_tcp_candidate(candidate_addr)?;
@@ -175,20 +181,87 @@ impl SessionManager {
         // Decode RFC 4571 framing — the raw TCP data has a 2-byte length prefix
         let mut decoder = super::tcp_framing::TcpFrameDecoder::new();
         decoder.extend(first_packet);
-        let ice_pkt = match decoder.next_packet() {
-            Ok(Some(pkt)) => pkt,
-            Ok(None) => {
-                return Err(WebRTCError::ConnectionFailed(
-                    "Incomplete RFC 4571 frame in first packet".to_string(),
-                ));
-            }
-            Err(e) => {
-                return Err(WebRTCError::ConnectionFailed(format!(
-                    "Invalid RFC 4571 frame in first packet: {:?}",
-                    e
-                )));
-            }
+        let mut frames: Vec<Vec<u8>> = Vec::new();
+        let mut total_read = first_packet.len();
+
+        let start = tokio::time::Instant::now();
+        let timeout_err = || {
+            WebRTCError::ConnectionFailed(format!(
+                "Timed out waiting for first RFC 4571 frame after {:?}",
+                start.elapsed()
+            ))
         };
+        let deadline = start + INITIAL_FRAME_TIMEOUT;
+        loop {
+            match decoder.next_packet() {
+                Ok(Some(pkt)) => {
+                    frames.push(pkt);
+                    break;
+                }
+                Ok(None) => {
+                    if total_read > MAX_INITIAL_BUFFER {
+                        return Err(WebRTCError::ConnectionFailed(
+                            format!(
+                                "Excessive data without a complete RFC 4571 frame (read {} bytes, max {} bytes)",
+                                total_read,
+                                MAX_INITIAL_BUFFER
+                            ),
+                        ));
+                    }
+                    let mut tmp = vec![0u8; INITIAL_READ_CHUNK];
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
+                        return Err(timeout_err());
+                    }
+                    let read_res = tokio::time::timeout(remaining, tcp_stream.read(&mut tmp)).await;
+                    let n = match read_res {
+                        Ok(Ok(0)) => {
+                            return Err(WebRTCError::ConnectionFailed(
+                                "Connection closed before first RFC 4571 frame".to_string(),
+                            ));
+                        }
+                        Ok(Ok(n)) => n,
+                        Ok(Err(e)) => {
+                            return Err(WebRTCError::ConnectionFailed(format!(
+                                "TCP read error before first frame: {}",
+                                e
+                            )));
+                        }
+                        Err(_) => {
+                            return Err(timeout_err());
+                        }
+                    };
+                    total_read += n;
+                    tmp.truncate(n);
+                    decoder.extend(&tmp);
+                }
+                Err(e) => {
+                    return Err(WebRTCError::ConnectionFailed(format!(
+                        "Invalid RFC 4571 frame in first packet: {:?}",
+                        e
+                    )));
+                }
+            }
+        }
+
+        // Drain any additional complete frames already buffered.
+        loop {
+            match decoder.next_packet() {
+                Ok(Some(pkt)) => frames.push(pkt),
+                Ok(None) => break,
+                Err(e) => {
+                    return Err(WebRTCError::ConnectionFailed(format!(
+                        "Invalid RFC 4571 frame after first packet: {:?}",
+                        e
+                    )));
+                }
+            }
+        }
+
+        let ice_pkt = frames
+            .get(0)
+            .cloned()
+            .ok_or_else(|| WebRTCError::ConnectionFailed("No RFC 4571 frames decoded".to_string()))?;
 
         let mut pending = self.pending_sessions.write().await;
 
@@ -222,22 +295,37 @@ impl SessionManager {
 
         info!("Session {} matched TCP connection from {}", session_id, peer_addr);
 
-        // Feed the first deframed packet into str0m
-        let recv = str0m::net::Receive {
-            proto: str0m::net::Protocol::Tcp,
-            source: peer_addr,
-            destination: candidate_addr,
-            contents: (&*ice_pkt).try_into()
-                .map_err(|e| WebRTCError::ConnectionFailed(format!("First packet parse: {}", e)))?,
-        };
-        session.rtc.handle_input(Input::Receive(std::time::Instant::now(), recv))
-            .map_err(|e| WebRTCError::ConnectionFailed(format!("handle_input: {}", e)))?;
+        // Feed the first deframed packet (and any extra buffered packets) into str0m
+        for (idx, pkt) in frames.iter().enumerate() {
+            let recv = str0m::net::Receive {
+                proto: str0m::net::Protocol::Tcp,
+                source: peer_addr,
+                destination: candidate_addr,
+                contents: match (&**pkt).try_into() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        if idx == 0 {
+                            return Err(WebRTCError::ConnectionFailed(format!(
+                                "First packet parse: {}",
+                                e
+                            )));
+                        }
+                        continue;
+                    }
+                },
+            };
+            session.rtc.handle_input(Input::Receive(std::time::Instant::now(), recv))
+                .map_err(|e| WebRTCError::ConnectionFailed(format!("handle_input: {}", e)))?;
+        }
 
         // Immediately drain str0m outputs (DTLS handshake responses, ICE checks)
         // BEFORE spawning the drive loop. Without this, the browser's DTLS
         // handshake times out behind TCP proxies because responses sit queued
         // in str0m until the tokio task is scheduled.
-        drain_initial_outputs(&mut session, &mut tcp_stream).await?;
+        if let Err(err) = drain_initial_outputs(&mut session, &mut tcp_stream).await {
+            self.shared_state.decrement_webrtc_sessions();
+            return Err(err);
+        }
 
         // Spawn the session drive loop
         let shared_state = self.shared_state.clone();
@@ -250,6 +338,7 @@ impl SessionManager {
         ));
         let runtime_settings = self.runtime_settings.clone();
 
+        let initial_buffer = decoder.take_remaining();
         tokio::spawn(async move {
             rtc_session::drive_session(
                 session,
@@ -261,6 +350,7 @@ impl SessionManager {
                 upload_handler,
                 clipboard,
                 runtime_settings,
+                initial_buffer,
             ).await;
         });
 
@@ -339,7 +429,7 @@ async fn drain_initial_outputs(
 
 /// Parse a Host header value (e.g. "example.com:8008" or "1.2.3.4:8008")
 /// into a SocketAddr. Falls back to `default_port` if no port is specified.
-fn parse_host_to_addr(host: &str, default_port: u16) -> Option<SocketAddr> {
+async fn parse_host_to_addr(host: &str, default_port: u16) -> Option<SocketAddr> {
     // Try direct parse first (covers "1.2.3.4:8008")
     if let Ok(addr) = host.parse::<SocketAddr>() {
         return Some(addr);
@@ -351,19 +441,17 @@ fn parse_host_to_addr(host: &str, default_port: u16) -> Option<SocketAddr> {
                 return Some(SocketAddr::new(ip, port));
             }
             // Domain name — resolve it
-            use std::net::ToSocketAddrs;
-            return format!("{}:{}", h, port).to_socket_addrs().ok()?.next();
+            return tokio::net::lookup_host((h, port)).await.ok()?.next();
         }
     }
     // Bare host without port
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         return Some(SocketAddr::new(ip, default_port));
     }
-    use std::net::ToSocketAddrs;
-    format!("{}:{}", host, default_port).to_socket_addrs().ok()?.next()
+    tokio::net::lookup_host((host, default_port)).await.ok()?.next()
 }
 
-fn resolve_candidate_addr(
+async fn resolve_candidate_addr(
     config: &WebRTCConfig,
     client_host: Option<&str>,
     listen_addr: SocketAddr,
@@ -382,7 +470,7 @@ fn resolve_candidate_addr(
 
     if config.candidate_from_host_header {
         if let Some(host) = client_host {
-            if let Some(addr) = parse_host_to_addr(host, listen_addr.port()) {
+            if let Some(addr) = parse_host_to_addr(host, listen_addr.port()).await {
                 return addr;
             }
         }

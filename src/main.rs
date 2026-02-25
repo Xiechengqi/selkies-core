@@ -356,8 +356,11 @@ fn run(
     let mut in_keyframe = false;
     let mut rtp_frame_buf: Vec<Vec<u8>> = Vec::new();
     let mut prev_rtp_ts: Option<u32> = None;
+    let mut last_rtp_sample: Option<Instant> = None;
     let mut last_render = Instant::now();
     let mut prev_button_mask: u32 = 0;
+    let (disp_w, disp_h) = shared_state.display_size();
+    let mut prev_cursor_pos: (f64, f64) = (disp_w as f64 / 2.0, disp_h as f64 / 2.0);
     let mut prev_cursor_name: String = "default".to_string();
     let mut prev_taskbar_json: String = String::new();
     let mut prev_dc_open_count: u64 = 0;
@@ -432,7 +435,13 @@ fn run(
         }
         comp.display_handle.flush_clients().ok();
 
-        drain_input_events(&mut input_rx, &mut comp, &shared_state, &mut prev_button_mask);
+        drain_input_events(
+            &mut input_rx,
+            &mut comp,
+            &shared_state,
+            &mut prev_button_mask,
+            &mut prev_cursor_pos,
+        );
         comp.display_handle.flush_clients().ok(); // flush injected input events immediately
 
         // Read clipboard from Wayland client (remote → browser).
@@ -650,7 +659,16 @@ fn run(
             }
         }
 
-        pull_and_broadcast_rtp(&pipeline, &shared_state, &mut rtp_packets, &mut keyframe_buf, &mut in_keyframe, &mut rtp_frame_buf, &mut prev_rtp_ts);
+        pull_and_broadcast_rtp(
+            &pipeline,
+            &shared_state,
+            &mut rtp_packets,
+            &mut keyframe_buf,
+            &mut in_keyframe,
+            &mut rtp_frame_buf,
+            &mut prev_rtp_ts,
+            &mut last_rtp_sample,
+        );
 
         if shared_state.take_keyframe_request() {
             pipeline.request_keyframe();
@@ -698,6 +716,7 @@ fn drain_input_events(
     state: &mut Compositor,
     shared: &Arc<web::SharedState>,
     prev_button_mask: &mut u32,
+    prev_cursor_pos: &mut (f64, f64),
 ) {
     use smithay::utils::SERIAL_COUNTER;
 
@@ -710,7 +729,16 @@ fn drain_input_events(
 
         match ev.event_type {
             InputEvent::MouseMove => {
-                let pos = (ev.mouse_x as f64, ev.mouse_y as f64).into();
+                let (mut x, mut y) = if ev.text == "relative" {
+                    (prev_cursor_pos.0 + ev.mouse_x as f64, prev_cursor_pos.1 + ev.mouse_y as f64)
+                } else {
+                    (ev.mouse_x as f64, ev.mouse_y as f64)
+                };
+                let (disp_w, disp_h) = shared.display_size();
+                x = x.clamp(0.0, disp_w.saturating_sub(1) as f64);
+                y = y.clamp(0.0, disp_h.saturating_sub(1) as f64);
+                *prev_cursor_pos = (x, y);
+                let pos = (x, y).into();
                 let under = state.surface_under(pos);
                 let ptr = state.seat.get_pointer().unwrap();
                 ptr.motion(
@@ -747,8 +775,8 @@ fn drain_input_events(
                             let pressed = new_mask & (1 << bit) != 0;
                             let synth = InputEventData {
                                 event_type: InputEvent::MouseButton,
-                                mouse_x: ev.mouse_x,
-                                mouse_y: ev.mouse_y,
+                                mouse_x: x as i32,
+                                mouse_y: y as i32,
                                 mouse_button: bit,
                                 button_pressed: pressed,
                                 ..Default::default()
@@ -911,7 +939,13 @@ fn inject_key(state: &mut Compositor, ev: &InputEventData, serial: smithay::util
 
     // Frontend sends X11 keysyms; smithay expects xkb keycodes (evdev + 8).
     // Use a lookup table for the most common keysyms.
-    let keycode = keysym_to_keycode(ev.keysym);
+    let keycode = match keysym_to_keycode(ev.keysym) {
+        Some(code) => code,
+        None => {
+            warn!("Unknown keysym 0x{:x}; dropping key event", ev.keysym);
+            return;
+        }
+    };
     let has_focus = keyboard.current_focus().is_some();
     info!("inject_key: keysym=0x{:x} keycode={} pressed={} has_focus={}", ev.keysym, keycode, ev.key_pressed, has_focus);
     keyboard.input::<(), _>(
@@ -955,11 +989,12 @@ fn inject_text(state: &mut Compositor, ev: &InputEventData) {
             (),
         );
 
-        // Simulate Ctrl+Shift+V (terminal paste shortcut)
+        // Simulate Ctrl+Shift+V (terminal paste shortcut).
+        // Use known evdev keycodes directly to avoid keysym mapping gaps.
         let keyboard = state.seat.get_keyboard().unwrap();
-        let ctrl_code = keysym_to_keycode(0xffe3);   // Control_L
-        let shift_code = keysym_to_keycode(0xffe1);  // Shift_L
-        let v_code = keysym_to_keycode(0x76);         // v
+        let ctrl_code: u32 = 37;  // Control_L
+        let shift_code: u32 = 50; // Shift_L
+        let v_code: u32 = 55;     // v
 
         let s = smithay::utils::SERIAL_COUNTER.next_serial();
         keyboard.input::<(), _>(state, smithay::input::keyboard::Keycode::from(ctrl_code),
@@ -983,7 +1018,7 @@ fn inject_text(state: &mut Compositor, ev: &InputEventData) {
 }
 
 /// Convert X11 keysym to xkb keycode (evdev keycode + 8).
-fn keysym_to_keycode(keysym: u32) -> u32 {
+fn keysym_to_keycode(keysym: u32) -> Option<u32> {
     match keysym {
         // Letters (a-z / A-Z)
         0x61 | 0x41 => 38, 0x62 | 0x42 => 56, 0x63 | 0x43 => 54,
@@ -1030,11 +1065,12 @@ fn keysym_to_keycode(keysym: u32) -> u32 {
         0x2f | 0x3f => 61,  // slash / question
         // Misc
         0xff13 => 127, 0xff14 => 78, 0xff61 => 107, 0xff7f => 77,
-        other => {
-            log::debug!("Unknown keysym 0x{:x}, passing as raw", other);
-            other
+        _ => {
+            log::debug!("Unknown keysym 0x{:x}, no keycode mapping", keysym);
+            return None;
         }
     }
+    .into()
 }
 
 /// Check if an RTP packet contains an H.264 keyframe NAL unit.
@@ -1058,6 +1094,7 @@ fn pull_and_broadcast_rtp(
     in_keyframe: &mut bool,
     frame_buf: &mut Vec<Vec<u8>>,
     prev_ts: &mut Option<u32>,
+    last_sample: &mut Option<Instant>,
 ) {
     while let Some(sample) = pipeline.try_pull_sample() {
         if let Some(buffer) = sample.buffer() {
@@ -1075,13 +1112,25 @@ fn pull_and_broadcast_rtp(
             }
             *prev_ts = Some(ts);
             frame_buf.push(data);
+            *last_sample = Some(Instant::now());
+            let has_marker = frame_buf
+                .last()
+                .map(|pkt| pkt.len() >= 2 && (pkt[1] & 0x80) != 0)
+                .unwrap_or(false);
+            if has_marker {
+                flush_frame(frame_buf, shared, rtp_count, keyframe_buf, in_keyframe);
+            }
         }
     }
 
-    // Don't hold the last frame indefinitely — flush it now so the
-    // browser can decode without waiting for the next frame's first packet.
+    // If no new packets arrived for a short window, flush the buffered frame
+    // to avoid stalling when marker bits are missing.
     if !frame_buf.is_empty() {
-        flush_frame(frame_buf, shared, rtp_count, keyframe_buf, in_keyframe);
+        if let Some(ts) = last_sample {
+            if ts.elapsed() >= Duration::from_millis(50) {
+                flush_frame(frame_buf, shared, rtp_count, keyframe_buf, in_keyframe);
+            }
+        }
     }
 }
 
