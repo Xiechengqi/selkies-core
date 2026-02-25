@@ -14,15 +14,17 @@ use crate::input::InputEventData;
 use crate::runtime_settings::RuntimeSettings;
 use crate::web::SharedState;
 
-use log::{info, warn};
+use super::tcp_framing::frame_packet;
+use log::{info, warn, debug};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, RwLock};
 
-use str0m::Input;
+use str0m::{Input, Output};
 
 /// How long a pending session can wait for a TCP connection before being reaped.
 const PENDING_SESSION_TTL: Duration = Duration::from_secs(30);
@@ -165,7 +167,7 @@ impl SessionManager {
     /// as a drive loop task.
     pub async fn handle_ice_tcp_connection(
         &self,
-        tcp_stream: TcpStream,
+        mut tcp_stream: TcpStream,
         peer_addr: SocketAddr,
         _local_addr: SocketAddr,
         first_packet: &[u8],
@@ -231,6 +233,12 @@ impl SessionManager {
         session.rtc.handle_input(Input::Receive(std::time::Instant::now(), recv))
             .map_err(|e| WebRTCError::ConnectionFailed(format!("handle_input: {}", e)))?;
 
+        // Immediately drain str0m outputs (DTLS handshake responses, ICE checks)
+        // BEFORE spawning the drive loop. Without this, the browser's DTLS
+        // handshake times out behind TCP proxies because responses sit queued
+        // in str0m until the tokio task is scheduled.
+        drain_initial_outputs(&mut session, &mut tcp_stream).await?;
+
         // Spawn the session drive loop
         let shared_state = self.shared_state.clone();
         let input_tx = self.input_tx.clone();
@@ -291,6 +299,42 @@ async fn reap_stale_sessions(
             warn!("Reaped stale pending session: {}", id);
         }
     }
+}
+
+/// Drain str0m outputs immediately after feeding the first ICE packet.
+/// This ensures DTLS handshake responses are sent back to the browser
+/// before the drive loop task is scheduled, preventing timeout behind proxies.
+async fn drain_initial_outputs(
+    session: &mut RtcSession,
+    tcp_stream: &mut TcpStream,
+) -> Result<(), WebRTCError> {
+    let mut count = 0u32;
+    loop {
+        match session.rtc.poll_output() {
+            Ok(Output::Transmit(t)) => {
+                let framed = frame_packet(&t.contents);
+                tcp_stream.write_all(&framed).await
+                    .map_err(|e| WebRTCError::ConnectionFailed(
+                        format!("Initial drain TCP write: {}", e),
+                    ))?;
+                count += 1;
+            }
+            Ok(Output::Event(event)) => {
+                debug!("Session {} initial event: {:?}", session.id, event);
+            }
+            Ok(Output::Timeout(_)) => break,
+            Err(e) => {
+                return Err(WebRTCError::ConnectionFailed(
+                    format!("Initial drain poll_output: {}", e),
+                ));
+            }
+        }
+    }
+    if count > 0 {
+        tcp_stream.flush().await.ok();
+        info!("Session {} drained {} initial packets", session.id, count);
+    }
+    Ok(())
 }
 
 /// Parse a Host header value (e.g. "example.com:8008" or "1.2.3.4:8008")

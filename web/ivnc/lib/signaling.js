@@ -276,6 +276,8 @@ export class WebRTCDemoSignaling {
         } else if (msg.ice != null) {
             var icecandidate = new RTCIceCandidate(msg.ice);
             this._setICE(icecandidate);
+        } else if (msg.type === 'pong' || msg.pong != null) {
+            // Keepalive pong response — silently ignore
         } else {
             this._setError("unhandled JSON message: " + msg);
         }

@@ -1480,6 +1480,11 @@ export default function webrtc() {
 					if (!statWatchEnabled) {
 						enableStatWatch();
 					}
+				} else if (videoConnected === "failed") {
+					// WebRTC connection died — reset and reconnect
+					console.log("[webrtc] Connection failed, resetting");
+					status = 'connecting';
+					webrtc.reset();
 				}
 				updateStatusDisplay();
 			};
