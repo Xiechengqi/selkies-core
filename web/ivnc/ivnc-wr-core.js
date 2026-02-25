@@ -404,7 +404,7 @@ function showChangePasswordModal() {
 				msg.textContent = '密码已修改，下次请求将使用新密码';
 				setTimeout(close, 1500);
 			} else {
-				const data = await resp.json().catch(() => ());
+				const data = await resp.json().catch(() => ({}));
 				msg.className = 'pwd-msg error';
 				msg.textContent = data.error || '修改失败';
 			}
