@@ -364,6 +364,9 @@ function showChangePasswordModal() {
 
 	const newInput = document.getElementById('pwd-new');
 	const confirmInput = document.getElementById('pwd-confirm');
+	// Allow native keyboard input (bypass VNC key capture)
+	newInput.classList.add('allow-native-input');
+	confirmInput.classList.add('allow-native-input');
 	const msg = document.getElementById('pwd-msg');
 	const okBtn = document.getElementById('pwd-ok');
 	const cancelBtn = document.getElementById('pwd-cancel');
