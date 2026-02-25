@@ -216,6 +216,7 @@ pub async fn drive_session(
     upload_handler: Arc<Mutex<FileUploadHandler>>,
     clipboard: Arc<Mutex<ClipboardReceiver>>,
     runtime_settings: Arc<RuntimeSettings>,
+    initial_buffer: Vec<u8>,
 ) {
     let session_id = session.id.clone();
     info!("Session {} drive loop started (peer: {})", session_id, peer_addr);
@@ -236,6 +237,9 @@ pub async fn drive_session(
     };
 
     let mut decoder = TcpFrameDecoder::new();
+    if !initial_buffer.is_empty() {
+        decoder.extend(&initial_buffer);
+    }
     let mut buf = vec![0u8; 65535];
 
     // Use mpsc subscribers (reliable cross-thread wakeup, unlike broadcast)

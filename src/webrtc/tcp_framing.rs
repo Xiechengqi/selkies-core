@@ -64,6 +64,10 @@ impl TcpFrameDecoder {
         self.buf.drain(..total);
         Ok(Some(pkt))
     }
+
+    pub fn take_remaining(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.buf)
+    }
 }
 
 #[cfg(test)]
@@ -109,6 +113,15 @@ mod tests {
 
         assert_eq!(decoder.next_packet().unwrap().unwrap(), b"first");
         assert_eq!(decoder.next_packet().unwrap().unwrap(), b"second");
+        assert!(decoder.next_packet().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_take_remaining_clears_buffer() {
+        let mut decoder = TcpFrameDecoder::new();
+        decoder.extend(&[0x00, 0x05, b'h', b'e']);
+        let remaining = decoder.take_remaining();
+        assert_eq!(remaining, vec![0x00, 0x05, b'h', b'e']);
         assert!(decoder.next_packet().unwrap().is_none());
     }
 }
