@@ -327,7 +327,7 @@ impl Default for Config {
                 mouse_sensitivity: 1.0,
             },
             audio: AudioConfig {
-                enabled: false,
+                enabled: cfg!(feature = "pulseaudio"),
                 sample_rate: 48_000,
                 channels: 2,
                 bitrate: 128_000,
