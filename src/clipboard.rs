@@ -39,6 +39,12 @@ impl ClipboardReceiver {
             self.handle_single_text(payload);
             return true;
         }
+        // Legacy format: "c,<base64>"
+        if message.starts_with("c,") {
+            let payload = message.trim_start_matches("c,");
+            self.handle_single_text(payload);
+            return true;
+        }
         if message.starts_with("cb,") {
             let payload = message.trim_start_matches("cb,");
             self.handle_single_binary(payload);

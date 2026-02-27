@@ -54,34 +54,41 @@ impl XdgShellHandler for Compositor {
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let has_parent = surface.parent().is_some();
 
-        // Detect dialog: has explicit parent, or the new window's process is a
-        // child of an existing window's process (cross-process dialogs like
-        // Chrome file choosers).
-        let is_child_process = {
+        // Detect dialog via multiple heuristics:
+        // 1. Explicit parent set by the toolkit (xdg_toplevel.set_parent)
+        // 2. New window's process is a child of an existing window's process
+        //    (cross-process dialogs like Chrome file choosers)
+        // 3. Same PID already has a window in the space (same-process secondary
+        //    windows like file chooser dialogs in GTK/Qt/Electron apps)
+        let (is_child_process, is_same_pid) = {
             let new_pid = surface.wl_surface().client()
                 .and_then(|c| c.get_credentials(&self.display_handle).ok())
                 .map(|c| c.pid);
             if let Some(new_pid) = new_pid {
-                self.space.elements().any(|w| {
+                let mut child = false;
+                let mut same = false;
+                for w in self.space.elements() {
                     let existing_pid = w.toplevel().unwrap().wl_surface().client()
                         .and_then(|c| c.get_credentials(&self.display_handle).ok())
                         .map(|c| c.pid);
                     if let Some(ep) = existing_pid {
-                        // Only check if new is descendant of existing (not reverse)
-                        new_pid != ep && is_descendant_of(new_pid, ep)
-                    } else {
-                        false
+                        if new_pid == ep {
+                            same = true;
+                        } else if is_descendant_of(new_pid, ep) {
+                            child = true;
+                        }
                     }
-                })
+                }
+                (child, same)
             } else {
-                false
+                (false, false)
             }
         };
 
-        let is_dialog = has_parent || is_child_process;
+        let is_dialog = has_parent || is_child_process || is_same_pid;
 
-        log::info!("new_toplevel: is_dialog={} (parent={}, child_proc={})",
-            is_dialog, has_parent, is_child_process);
+        log::info!("new_toplevel: is_dialog={} (parent={}, child_proc={}, same_pid={})",
+            is_dialog, has_parent, is_child_process, is_same_pid);
 
         let window = Window::new_wayland_window(surface.clone());
 
@@ -124,11 +131,27 @@ impl XdgShellHandler for Compositor {
     }
 
     fn parent_changed(&mut self, surface: ToplevelSurface) {
-        // When a toplevel gets a parent (becomes a dialog), just track it.
-        // Don't force any size - let the app decide.
         if surface.parent().is_some() {
-            log::info!("parent_changed: dialog detected");
-            self.dialog_surfaces.insert(surface.wl_surface().id().protocol_id());
+            let proto_id = surface.wl_surface().id().protocol_id();
+            log::info!("parent_changed: dialog detected (sid={})", proto_id);
+            self.dialog_surfaces.insert(proto_id);
+
+            // Remove from taskbar if it was previously registered as a main window
+            let surf_id = surface.wl_surface().id();
+            let was_registered = self.window_registry.iter().any(|w| w.id() == surf_id);
+            if was_registered {
+                self.window_registry.retain(|w| w.id() != surf_id);
+                self.taskbar_dirty = true;
+                log::info!("parent_changed: removed sid={} from taskbar", proto_id);
+            }
+
+            // Undo fullscreen: let the app use its preferred dialog size
+            surface.with_pending_state(|state| {
+                state.states.unset(xdg_toplevel::State::Fullscreen);
+                state.states.unset(xdg_toplevel::State::Maximized);
+                state.size = None;
+            });
+            surface.send_pending_configure();
         }
     }
 

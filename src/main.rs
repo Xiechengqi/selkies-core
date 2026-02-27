@@ -141,6 +141,34 @@ fn check_runtime_deps() {
     }
 }
 
+/// Ensure PulseAudio daemon is running so audio capture can connect.
+/// If not running, starts it with `--exit-idle-time=-1` to keep it alive.
+#[cfg(feature = "pulseaudio")]
+fn ensure_pulseaudio() {
+    use std::process::Command;
+
+    // Check if already running
+    let status = Command::new("pulseaudio")
+        .arg("--check")
+        .status();
+    if let Ok(s) = status {
+        if s.success() {
+            info!("PulseAudio already running");
+            return;
+        }
+    }
+
+    info!("PulseAudio not running, starting daemon...");
+    match Command::new("pulseaudio")
+        .args(["--start", "--exit-idle-time=-1"])
+        .status()
+    {
+        Ok(s) if s.success() => info!("PulseAudio daemon started"),
+        Ok(s) => warn!("PulseAudio start exited with: {}", s),
+        Err(e) => warn!("Failed to start PulseAudio: {}", e),
+    }
+}
+
 fn main() {
     check_runtime_deps();
 
@@ -312,6 +340,12 @@ fn run(
                 error!("Async services error: {}", e);
             }
         });
+    }
+
+    // Ensure PulseAudio is running (needed for audio capture)
+    #[cfg(feature = "pulseaudio")]
+    if config.audio.enabled {
+        ensure_pulseaudio();
     }
 
     // Audio capture thread

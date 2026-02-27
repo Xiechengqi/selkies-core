@@ -1322,16 +1322,20 @@ export default function webrtc() {
 		}, 1000);
 	}
 
+	var _lastSentClipboard = '';
 	function handleWindowFocus() {
 		if (webrtc._send_channel === null || webrtc._send_channel.readyState !== 'open') return;
 		// reset keyboard to avoid stuck keys.
 		webrtc.sendDataChannelMessage("kr");
 		// clipboard interface is only available in secure context
 		if (window.isSecureContext) {
-			// Send clipboard contents.
+			// Send clipboard contents if changed.
 			navigator.clipboard.readText()
 				.then(text => {
-						webrtc.sendDataChannelMessage(`cw,${stringToBase64(text)}`);
+						if (text && text !== _lastSentClipboard) {
+							_lastSentClipboard = text;
+							webrtc.sendDataChannelMessage(`cw,${stringToBase64(text)}`);
+						}
 				})
 				.catch(err => {
 						webrtc._setStatus('Failed to read clipboard contents: ' + err);
@@ -1730,14 +1734,17 @@ export default function webrtc() {
 				}
 			}
 
-			// Unmute audio on first user interaction (click/keydown)
-			const unmuteOnInteraction = () => {
-				webrtc.unmuteAudio();
-				document.removeEventListener('click', unmuteOnInteraction);
-				document.removeEventListener('keydown', unmuteOnInteraction);
-			};
-			document.addEventListener('click', unmuteOnInteraction);
-			document.addEventListener('keydown', unmuteOnInteraction);
+			// Unmute audio on first user interaction (registered once)
+			if (!webrtc._unmuteListenersBound) {
+				webrtc._unmuteListenersBound = true;
+				const unmuteOnInteraction = () => {
+					webrtc.unmuteAudio();
+					document.removeEventListener('click', unmuteOnInteraction);
+					document.removeEventListener('keydown', unmuteOnInteraction);
+				};
+				document.addEventListener('click', unmuteOnInteraction);
+				document.addEventListener('keydown', unmuteOnInteraction);
+			}
 
 			// Actions to take whenever window changes focus
 			window.addEventListener('focus', handleWindowFocus);
@@ -1806,6 +1813,14 @@ export default function webrtc() {
 				var text = e.clipboardData && e.clipboardData.getData('text/plain');
 				if (text) {
 					e.preventDefault();
+					// Skip sending if the pasted text matches what the remote
+					// app already has (avoids overwriting with stale browser
+					// clipboard when navigator.clipboard.writeText is still
+					// pending from a recent remote→browser sync).
+					if (text === webrtc._remoteClipboard || text === _lastSentClipboard) {
+						return;
+					}
+					_lastSentClipboard = text;
 					webrtc.sendDataChannelMessage('cw,' + stringToBase64(text));
 				}
 			});

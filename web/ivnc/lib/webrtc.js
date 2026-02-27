@@ -987,6 +987,10 @@ export class WebRTCDemo {
 		if (playPromise !== undefined) {
 			playPromise.then(() => {
 				this._setDebug("Stream is playing.");
+				// Sync audio playback after video succeeds
+				if (this._audioElement) {
+					this._audioElement.play().catch(() => {});
+				}
 			}).catch((e) => {
 				console.error("play() rejected:", e.message);
 				if (this.onplaystreamrequired !== null) {

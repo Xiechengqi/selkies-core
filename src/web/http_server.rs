@@ -155,6 +155,7 @@ pub async fn run_http_server_with_webrtc(
 
     // Set up fallback for static files
     let auth_state = state.clone();
+    let metrics_state = state.clone(); // keep a copy for the accept loop (metrics)
     let app: Router<()> = if use_embedded {
         app.fallback(embedded_fallback_handler)
             .with_state(state)
@@ -204,6 +205,7 @@ pub async fn run_http_server_with_webrtc(
 
         let app = app.clone();
         let sm = session_manager.clone();
+        let conn_state = metrics_state.clone();
         #[cfg(feature = "tls")]
         let tls_acceptor = tls_acceptor.clone();
 
@@ -237,6 +239,15 @@ pub async fn run_http_server_with_webrtc(
                 }
             }
             let kind = classify_first_bytes(&first_bytes);
+            debug!("Connection from {} classified as {:?} (first_bytes={:02x?})", peer_addr, kind, &first_bytes);
+
+            // Record protocol classification metric
+            conn_state.record_protocol_classification(match kind {
+                ConnectionType::Http => "http",
+                ConnectionType::IceTcp => "ice_tcp",
+                ConnectionType::Tls => "tls",
+                ConnectionType::Unknown => "unknown",
+            });
 
             // In TLS mode: disambiguate TLS vs DTLS by version bytes
             #[cfg(feature = "tls")]
@@ -273,11 +284,14 @@ pub async fn run_http_server_with_webrtc(
                 return;
             }
 
-            // Non-TLS mode: original first-byte classification
+            // Non-TLS mode: first-byte classification
             match kind {
                 ConnectionType::IceTcp => handle_ice_connection(tcp_stream, peer_addr, sm).await,
-                ConnectionType::Http | ConnectionType::Tls | ConnectionType::Unknown => {
+                ConnectionType::Http | ConnectionType::Tls => {
                     serve_http(TokioIo::new(tcp_stream), app).await;
+                }
+                ConnectionType::Unknown => {
+                    warn!("Unrecognized protocol from {} (first_bytes={:02x?}), closing", peer_addr, &first_bytes);
                 }
             }
         });
@@ -395,13 +409,23 @@ ivnc_client_latency_ms {}
 # HELP ivnc_client_fps Client-reported FPS
 # TYPE ivnc_client_fps gauge
 ivnc_client_fps {}
+# HELP ivnc_proto_connections_total Protocol classification counters
+# TYPE ivnc_proto_connections_total counter
+ivnc_proto_connections_total{{protocol="http"}} {}
+ivnc_proto_connections_total{{protocol="ice_tcp"}} {}
+ivnc_proto_connections_total{{protocol="tls"}} {}
+ivnc_proto_connections_total{{protocol="unknown"}} {}
 "#,
         uptime,
         clients,
         stats.cpu_percent,
         stats.mem_used,
         stats.client_latency_ms,
-        stats.client_fps
+        stats.client_fps,
+        stats.proto_http,
+        stats.proto_ice_tcp,
+        stats.proto_tls,
+        stats.proto_unknown
     )
 }
 

@@ -321,6 +321,17 @@ impl SharedState {
         stats.client_fps = fps;
     }
 
+    /// Record a protocol classification event
+    pub fn record_protocol_classification(&self, kind: &str) {
+        let mut stats = self.stats.lock().unwrap();
+        match kind {
+            "http" => stats.proto_http += 1,
+            "ice_tcp" => stats.proto_ice_tcp += 1,
+            "tls" => stats.proto_tls += 1,
+            _ => stats.proto_unknown += 1,
+        }
+    }
+
     /// Record an ICE candidate (TCP-only keeps a minimal counter)
     pub fn record_ice_candidate(&self, transport: Option<&str>) {
         let mut stats = self.stats.lock().unwrap();
@@ -527,6 +538,11 @@ pub struct RuntimeStats {
     pub mem_used: u64,
     pub ice_candidates_total: u64,
     pub ice_candidates_tcp: u64,
+    /// Protocol classification counters
+    pub proto_http: u64,
+    pub proto_ice_tcp: u64,
+    pub proto_tls: u64,
+    pub proto_unknown: u64,
 }
 
 impl Default for RuntimeStats {
@@ -543,6 +559,10 @@ impl Default for RuntimeStats {
             mem_used: 0,
             ice_candidates_total: 0,
             ice_candidates_tcp: 0,
+            proto_http: 0,
+            proto_ice_tcp: 0,
+            proto_tls: 0,
+            proto_unknown: 0,
         }
     }
 }

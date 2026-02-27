@@ -274,34 +274,9 @@ pub async fn drive_session(
         tokio::select! {
             biased;
 
-            // Video RTP from GStreamer → str0m (highest priority)
-            result = rtp_rx.recv() => {
-                match result {
-                    Some(pkt) if session.connected => {
-                        let _ = session.write_video_rtp(&pkt);
-                        // Drain all pending RTP packets in one go
-                        while let Ok(pkt) = rtp_rx.try_recv() {
-                            let _ = session.write_video_rtp(&pkt);
-                        }
-                    }
-                    Some(_) => {}
-                    None => break,
-                }
-            }
-
-            // Audio RTP → str0m
-            result = audio_rx.recv() => {
-                match result {
-                    Some(pkt) if session.connected => {
-                        let _ = session.write_audio_rtp(&pkt.data, audio_timestamp);
-                        audio_timestamp = audio_timestamp.wrapping_add(samples_per_frame);
-                    }
-                    Some(_) => {}
-                    None => break,
-                }
-            }
-
-            // TCP data from browser
+            // TCP data from browser (highest priority — STUN consent checks,
+            // DTLS, SCTP/DataChannel messages MUST be processed promptly or
+            // the browser will declare the connection dead)
             result = tcp_stream.read(&mut buf) => {
                 match result {
                     Ok(0) => {
@@ -344,6 +319,38 @@ pub async fn drive_session(
                         warn!("Session {} TCP read error: {}", session_id, e);
                         break;
                     }
+                }
+            }
+
+            // Video RTP from GStreamer → str0m
+            result = rtp_rx.recv() => {
+                match result {
+                    Some(pkt) if session.connected => {
+                        let _ = session.write_video_rtp(&pkt);
+                        // Drain all pending RTP packets in one go
+                        while let Ok(pkt) = rtp_rx.try_recv() {
+                            let _ = session.write_video_rtp(&pkt);
+                        }
+                    }
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+
+            // Audio RTP → str0m
+            result = audio_rx.recv() => {
+                match result {
+                    Some(pkt) if session.connected => {
+                        let _ = session.write_audio_rtp(&pkt.data, audio_timestamp);
+                        audio_timestamp = audio_timestamp.wrapping_add(samples_per_frame);
+                        // Drain all pending audio packets in one go
+                        while let Ok(pkt) = audio_rx.try_recv() {
+                            let _ = session.write_audio_rtp(&pkt.data, audio_timestamp);
+                            audio_timestamp = audio_timestamp.wrapping_add(samples_per_frame);
+                        }
+                    }
+                    Some(_) => {}
+                    None => break,
                 }
             }
 
