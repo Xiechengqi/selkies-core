@@ -153,6 +153,26 @@ pub async fn run_http_server_with_webrtc(
             .route("/{app}/signaling/", get(signaling_handler));
     }
 
+    // MCP Streamable HTTP endpoint
+    #[cfg(feature = "mcp")]
+    {
+        let mcp_state = state.clone();
+        let mcp_session_mgr = Arc::new(
+            rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default(),
+        );
+        let mcp_config = rmcp::transport::streamable_http_server::StreamableHttpServerConfig {
+            stateful_mode: true,
+            ..Default::default()
+        };
+        let mcp_service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
+            move || Ok(crate::mcp::McpServer::new(mcp_state.clone())),
+            mcp_session_mgr,
+            mcp_config,
+        );
+        app = app.route_service("/mcp", mcp_service);
+        info!("MCP Streamable HTTP endpoint enabled at /mcp");
+    }
+
     // Set up fallback for static files
     let auth_state = state.clone();
     let metrics_state = state.clone(); // keep a copy for the accept loop (metrics)

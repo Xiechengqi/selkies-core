@@ -19,6 +19,7 @@
 - **HTTP API** - 健康检查和 Prometheus 指标端点
 - **Basic Auth** - 内置 HTTP 基础认证
 - **TLS** - 可选自签名 HTTPS（`--tls`）
+- **MCP 服务器** - 可选 [Model Context Protocol](https://modelcontextprotocol.io) 支持，AI 代理可通过 13 个工具控制远程桌面（截图、鼠标、键盘、剪贴板、窗口管理）
 
 ## 快速开始
 
@@ -52,11 +53,14 @@ apt-get install build-essential pkg-config curl ca-certificates cmake \
 使用 `build.sh` 脚本（推荐）：
 
 ```bash
-# Release 构建（默认包含 PulseAudio 音频支持）
+# Release 构建（默认包含 PulseAudio 音频 + MCP 支持）
 bash build.sh --release
 
 # Debug 构建
 bash build.sh --debug
+
+# 追加额外 feature（如 TLS），mcp 始终包含
+bash build.sh --release --features tls
 ```
 
 构建完成后二进制文件位于项目根目录：`./ivnc`
@@ -75,6 +79,7 @@ cargo build --release
 | `pulseaudio` | PulseAudio 音频捕获 + Opus 编码 | ✅ |
 | `audio` | cpal 音频捕获 + Opus 编码 | |
 | `tls` | 自签名 HTTPS（`--tls` 启用，PWA 支持） | |
+| `mcp` | MCP 服务器（AI 代理远程桌面控制） | |
 | `vaapi` | Intel VA-API 硬件编码 | |
 | `nvenc` | NVIDIA NVENC 硬件编码 | |
 | `qsv` | Intel Quick Sync Video | |
@@ -214,6 +219,7 @@ XDG_RUNTIME_DIR=/run/user/$(id -u) ./ivnc -c config.toml --http-port 8008
 | `--basic-auth-password` | | 认证密码 |
 | `-v, --verbose` | | 详细日志 |
 | `--foreground` | | 前台运行 |
+| `--mcp-stdio` | | 同时启用 MCP stdio 和 Web VNC（需 `mcp` feature） |
 
 完整参数列表：`./ivnc --help`
 
@@ -313,6 +319,7 @@ ICE-TCP 连接也复用同一端口，通过首字节分类自动区分。
 | `GET /ui-config` | UI 配置 |
 | `GET /ws-config` | WebSocket 端口配置 |
 | `GET /webrtc` | WebRTC 信令 WebSocket |
+| `POST /mcp` | MCP Streamable HTTP 端点（需 `mcp` feature） |
 
 ### DataChannel 协议
 
@@ -424,6 +431,114 @@ iVnc 使用 str0m Sans-I/O WebRTC 库，所有 I/O 由调用方驱动：
 | `config/` | TOML 配置管理、UI 配置 |
 | `clipboard.rs` | 剪贴板同步 |
 | `file_upload.rs` | 文件上传处理 |
+| `mcp/` | MCP 服务器（截图、输入、剪贴板、窗口管理工具） |
+
+## MCP 服务器（AI 代理控制）
+
+iVnc 支持 [Model Context Protocol (MCP)](https://modelcontextprotocol.io)，允许 AI 代理（如 Claude）通过标准化协议控制远程桌面。
+
+### 编译
+
+`build.sh` 默认包含 `mcp` feature，无需额外指定：
+
+```bash
+bash build.sh --release
+```
+
+直接用 cargo 则需手动指定：
+
+```bash
+cargo build --release --features mcp
+```
+
+### 传输方式
+
+**Stdio 模式** — 适用于本地 MCP 客户端（如 Claude Desktop），Web VNC 同时可用：
+
+```bash
+./ivnc -c config.toml --mcp-stdio
+# MCP 通过 stdin/stdout 通信，HTTP/Web VNC 照常启动
+```
+
+**Streamable HTTP 模式** — 正常启动 iVnc 即可，MCP 端点自动挂载在 `/mcp`：
+
+```bash
+./ivnc -c config.toml --http-port 8008
+# MCP 端点：http://localhost:8008/mcp
+```
+
+> `/mcp` 端点受 Basic Auth 保护（如已启用）。
+
+### MCP 工具列表
+
+| 工具 | 说明 |
+|------|------|
+| `screenshot` | 截取桌面 JPEG 图像，支持延迟捕获 |
+| `mouse_move` | 移动鼠标光标 |
+| `mouse_click` | 鼠标点击（左/右/中键，支持双击） |
+| `mouse_scroll` | 鼠标滚轮 |
+| `keyboard_type` | 键入文本（自动处理 Shift） |
+| `keyboard_type_multiline` | 键入多行文本 |
+| `keyboard_key` | 按键/组合键（如 `Ctrl+c`、`Alt+F4`） |
+| `clipboard_read` | 读取剪贴板 |
+| `clipboard_write` | 写入剪贴板 |
+| `get_screen_info` | 获取屏幕尺寸、FPS、带宽等统计 |
+| `list_windows` | 列出所有窗口 |
+| `window_focus` | 聚焦窗口 |
+| `window_close` | 关闭窗口 |
+
+### AI Agent 接入
+
+#### Claude Code
+
+在项目目录的 `.mcp.json` 中添加：
+
+```json
+{
+  "mcpServers": {
+    "ivnc": {
+      "type": "streamable-http",
+      "url": "http://<server-ip>:8008/mcp",
+      "headers": {
+        "Authorization": "Basic <base64(user:password)>"
+      }
+    }
+  }
+}
+```
+
+如果未启用 Basic Auth，去掉 `headers` 即可。
+
+也可以用 CLI 快速添加：
+
+```bash
+claude mcp add ivnc --transport http http://<server-ip>:8008/mcp
+```
+
+#### Claude Desktop
+
+```json
+{
+  "mcpServers": {
+    "ivnc": {
+      "command": "/path/to/ivnc",
+      "args": ["-c", "/path/to/config.toml", "--mcp-stdio"]
+    }
+  }
+}
+```
+
+> Claude Desktop 通过 stdio 通信，会自动启动 ivnc 进程。适合本地使用。
+
+#### 其他 MCP 客户端
+
+任何支持 MCP Streamable HTTP 的客户端都可以直接连接：
+
+```
+POST http://<server-ip>:8008/mcp
+Content-Type: application/json
+Authorization: Basic <base64(user:password)>
+```
 
 ## 故障排除
 

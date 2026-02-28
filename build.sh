@@ -7,7 +7,7 @@ DIST_DIR="$WEB_DIR/dist"
 
 # ── Parse arguments ─────────────────────────────────────────
 BUILD_MODE="release"
-CARGO_FEATURES=""
+CARGO_FEATURES="mcp"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -20,7 +20,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --features)
-            CARGO_FEATURES="$2"
+            CARGO_FEATURES="$CARGO_FEATURES,$2"
             shift 2
             ;;
         *)

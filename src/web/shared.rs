@@ -100,6 +100,16 @@ pub struct SharedState {
 
     /// Password override (set via /api/change-password, takes precedence over config)
     pub password_override: Arc<RwLock<Option<String>>>,
+
+    /// MCP frame capture channel: MCP tools send oneshot senders here,
+    /// main loop responds with (width, height, xrgb_pixels)
+    #[cfg(feature = "mcp")]
+    pub frame_capture_tx: mpsc::UnboundedSender<tokio::sync::oneshot::Sender<(u32, u32, Vec<u8>)>>,
+    #[cfg(feature = "mcp")]
+    pub frame_capture_rx: Arc<Mutex<mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<(u32, u32, Vec<u8>)>>>>,
+
+    /// Cached latest taskbar JSON for MCP list_windows tool
+    pub last_taskbar_json: Arc<Mutex<Option<String>>>,
 }
 
 impl std::fmt::Debug for SharedState {
@@ -124,6 +134,8 @@ impl SharedState {
         let (audio_sender, _) = broadcast::channel(500);
         let (text_sender, _) = broadcast::channel(256);
         let (clipboard_incoming_tx, clipboard_incoming_rx) = mpsc::unbounded_channel();
+        #[cfg(feature = "mcp")]
+        let (frame_capture_tx, frame_capture_rx) = mpsc::unbounded_channel();
         let display_size = Arc::new(Mutex::new((config.display.width, config.display.height)));
 
         Self {
@@ -155,6 +167,11 @@ impl SharedState {
             audio_subscribers: Arc::new(Mutex::new(Vec::new())),
             text_subscribers: Arc::new(Mutex::new(Vec::new())),
             password_override: Arc::new(RwLock::new(None)),
+            #[cfg(feature = "mcp")]
+            frame_capture_tx,
+            #[cfg(feature = "mcp")]
+            frame_capture_rx: Arc::new(Mutex::new(frame_capture_rx)),
+            last_taskbar_json: Arc::new(Mutex::new(None)),
         }
     }
 

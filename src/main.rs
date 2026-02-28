@@ -15,6 +15,8 @@ mod web;
 mod compositor;
 mod gstreamer;
 mod webrtc;
+#[cfg(feature = "mcp")]
+mod mcp;
 
 use args::Args;
 use base64::Engine;
@@ -213,7 +215,7 @@ fn main() {
         config.clone(), ui_config, input_tx.clone(), runtime_settings.clone(),
     ));
 
-    if let Err(e) = run(config, shared_state, runtime_settings, input_rx, width, height) {
+    if let Err(e) = run(config, shared_state, runtime_settings, input_rx, width, height, &args) {
         eprintln!("Fatal error: {}", e);
         error!("Fatal error: {}", e);
         std::process::exit(1);
@@ -227,6 +229,8 @@ fn run(
     mut input_rx: mpsc::UnboundedReceiver<InputEventData>,
     width: u32,
     height: u32,
+    #[cfg_attr(not(feature = "mcp"), allow(unused))]
+    args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let running = Arc::new(AtomicBool::new(true));
 
@@ -335,8 +339,14 @@ fn run(
         let r = running.clone();
         let c = config.clone();
         let rs = runtime_settings.clone();
+        #[cfg(feature = "mcp")]
+        let mcp_stdio = args.mcp_stdio;
         tokio_rt.spawn(async move {
-            if let Err(e) = run_async_services(c, st, rs, r).await {
+            #[cfg(feature = "mcp")]
+            let result = run_async_services(c, st, rs, r, mcp_stdio).await;
+            #[cfg(not(feature = "mcp"))]
+            let result = run_async_services(c, st, rs, r).await;
+            if let Err(e) = result {
                 error!("Async services error: {}", e);
             }
         });
@@ -599,6 +609,8 @@ fn run(
                 let msg = format!("taskbar,{}", json);
                 info!("Taskbar broadcast: {}", msg);
                 shared_state.send_text(msg);
+                // Cache for MCP list_windows tool
+                *shared_state.last_taskbar_json.lock().unwrap() = Some(json);
             }
         }
 
@@ -689,6 +701,23 @@ fn run(
                 }
                 None => {
                     warn!("render_frame returned None (windows={})", comp.space.elements().count());
+                }
+            }
+        }
+
+        // MCP frame capture: drain pending requests and respond with current frame
+        #[cfg(feature = "mcp")]
+        {
+            let mut fc_rx = shared_state.frame_capture_rx.lock().unwrap();
+            while let Ok(sender) = fc_rx.try_recv() {
+                match backend.render_frame(&mut comp) {
+                    Some(pixels) => {
+                        let (w, h) = shared_state.display_size();
+                        let _ = sender.send((w, h, pixels));
+                    }
+                    None => {
+                        let _ = sender.send((0, 0, Vec::new()));
+                    }
                 }
             }
         }
@@ -1231,6 +1260,7 @@ async fn run_async_services(
     shared: Arc<web::SharedState>,
     runtime_settings: Arc<runtime_settings::RuntimeSettings>,
     _running: Arc<AtomicBool>,
+    #[cfg(feature = "mcp")] mcp_stdio: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let upload_settings = file_upload::FileUploadSettings::from_config(&config);
 
@@ -1261,6 +1291,26 @@ async fn run_async_services(
     } else {
         None
     };
+
+    // MCP stdio mode: run MCP server on stdin/stdout alongside HTTP
+    #[cfg(feature = "mcp")]
+    if mcp_stdio {
+        info!("Starting MCP server on stdio (HTTP server will also start)");
+        let mcp_server = mcp::McpServer::new(shared.clone());
+        let transport = rmcp::transport::io::stdio();
+        use rmcp::ServiceExt;
+        let service = mcp_server.serve(transport).await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                format!("MCP stdio error: {}", e).into()
+            })?;
+        tokio::spawn(async move {
+            if let Err(e) = service.waiting().await {
+                log::error!("MCP stdio session ended with error: {}", e);
+            } else {
+                log::info!("MCP stdio session ended");
+            }
+        });
+    }
 
     // HTTP server
     let port = config.http.port;

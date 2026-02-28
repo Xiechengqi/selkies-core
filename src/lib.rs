@@ -14,6 +14,8 @@ pub mod web;
 pub mod compositor;
 pub mod gstreamer;
 pub mod webrtc;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 
 // Re-exports
 pub use config::{Config, WebRTCConfig, VideoCodec, HardwareEncoder};

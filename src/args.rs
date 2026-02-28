@@ -76,6 +76,11 @@ pub struct Args {
     /// PID file path
     #[arg(long, default_value = "/var/run/ivnc.pid")]
     pub pidfile: PathBuf,
+
+    /// Run as MCP server on stdio (requires --features mcp)
+    #[cfg(feature = "mcp")]
+    #[arg(long, action)]
+    pub mcp_stdio: bool,
 }
 
 impl Args {
