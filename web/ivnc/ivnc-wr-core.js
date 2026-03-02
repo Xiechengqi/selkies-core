@@ -194,6 +194,116 @@ function InitUI() {
 		background: rgba(76, 134, 230, 0.2);
 		border-color: rgba(76, 134, 230, 0.4);
 	}
+	.taskbar-pin.disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+		pointer-events: none;
+	}
+	.taskbar-pin.uploading {
+		animation: pulse 1.5s ease-in-out infinite;
+	}
+	@keyframes pulse {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.5; }
+	}
+	.upload-toast {
+		position: fixed;
+		top: 20px;
+		right: 20px;
+		min-width: 300px;
+		max-width: 400px;
+		background: rgba(30, 30, 30, 0.95);
+		border: 1px solid rgba(255, 255, 255, 0.2);
+		border-radius: 8px;
+		padding: 16px;
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+		z-index: 10000;
+		color: #fff;
+		font-family: system-ui, sans-serif;
+		animation: slideIn 0.3s ease-out;
+	}
+	@keyframes slideIn {
+		from {
+			transform: translateX(400px);
+			opacity: 0;
+		}
+		to {
+			transform: translateX(0);
+			opacity: 1;
+		}
+	}
+	.upload-toast.success {
+		border-color: rgba(76, 175, 80, 0.5);
+	}
+	.upload-toast.error {
+		border-color: rgba(244, 67, 54, 0.5);
+	}
+	.upload-toast-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		margin-bottom: 8px;
+	}
+	.upload-toast-title {
+		font-size: 14px;
+		font-weight: 600;
+		color: #fff;
+	}
+	.upload-toast-close {
+		background: none;
+		border: none;
+		color: rgba(255, 255, 255, 0.6);
+		cursor: pointer;
+		font-size: 18px;
+		padding: 0;
+		width: 20px;
+		height: 20px;
+		line-height: 20px;
+		text-align: center;
+	}
+	.upload-toast-close:hover {
+		color: #fff;
+	}
+	.upload-toast-filename {
+		font-size: 12px;
+		color: rgba(255, 255, 255, 0.8);
+		margin-bottom: 8px;
+		word-break: break-all;
+	}
+	.upload-toast-progress {
+		width: 100%;
+		height: 4px;
+		background: rgba(255, 255, 255, 0.1);
+		border-radius: 2px;
+		overflow: hidden;
+		margin-bottom: 8px;
+	}
+	.upload-toast-progress-bar {
+		height: 100%;
+		background: linear-gradient(90deg, #4c86e6, #5ea3f5);
+		border-radius: 2px;
+		transition: width 0.3s ease;
+	}
+	.upload-toast-info {
+		font-size: 11px;
+		color: rgba(255, 255, 255, 0.6);
+		display: flex;
+		justify-content: space-between;
+	}
+	.upload-toast-path {
+		font-size: 12px;
+		color: #4caf50;
+		margin-top: 8px;
+		padding: 8px;
+		background: rgba(76, 175, 80, 0.1);
+		border-radius: 4px;
+		word-break: break-all;
+	}
+	.upload-toast-error {
+		font-size: 12px;
+		color: #f44336;
+		margin-top: 8px;
+	}
 	.taskbar-conn {
 		position: absolute;
 		right: 8px;
@@ -1008,6 +1118,121 @@ export default function webrtc() {
 		}
 	}
 
+	// Upload progress toast management
+	let currentUploadToast = null;
+	const UPLOAD_DIR = '~/Desktop'; // From config.toml
+
+	function showUploadToast(fileName, fileSize) {
+		// Remove existing toast if any
+		if (currentUploadToast) {
+			currentUploadToast.remove();
+		}
+
+		const toast = document.createElement('div');
+		toast.className = 'upload-toast';
+		toast.innerHTML = `
+			<div class="upload-toast-header">
+				<div class="upload-toast-title">上传文件</div>
+				<button class="upload-toast-close" onclick="this.parentElement.parentElement.remove()">×</button>
+			</div>
+			<div class="upload-toast-filename">${fileName}</div>
+			<div class="upload-toast-progress">
+				<div class="upload-toast-progress-bar" style="width: 0%"></div>
+			</div>
+			<div class="upload-toast-info">
+				<span class="upload-toast-percent">0%</span>
+				<span class="upload-toast-size">${formatFileSize(fileSize)}</span>
+			</div>
+		`;
+		document.body.appendChild(toast);
+		currentUploadToast = toast;
+		return toast;
+	}
+
+	function updateUploadProgress(toast, progress, fileName) {
+		if (!toast) return;
+		const progressBar = toast.querySelector('.upload-toast-progress-bar');
+		const percentText = toast.querySelector('.upload-toast-percent');
+		if (progressBar) progressBar.style.width = progress + '%';
+		if (percentText) percentText.textContent = progress + '%';
+	}
+
+	function showUploadSuccess(toast, fileName) {
+		if (!toast) return;
+		toast.className = 'upload-toast success';
+		const uploadPath = UPLOAD_DIR + '/' + fileName;
+		toast.innerHTML = `
+			<div class="upload-toast-header">
+				<div class="upload-toast-title">✓ 上传成功</div>
+				<button class="upload-toast-close" onclick="this.parentElement.parentElement.remove()">×</button>
+			</div>
+			<div class="upload-toast-filename">${fileName}</div>
+			<div class="upload-toast-path">文件已保存到: ${uploadPath}</div>
+		`;
+		// Auto-remove after 5 seconds
+		setTimeout(() => {
+			if (toast && toast.parentElement) {
+				toast.remove();
+				if (currentUploadToast === toast) {
+					currentUploadToast = null;
+				}
+			}
+		}, 5000);
+	}
+
+	function showUploadError(toast, fileName, errorMessage) {
+		if (!toast) {
+			toast = document.createElement('div');
+			toast.className = 'upload-toast error';
+			document.body.appendChild(toast);
+		} else {
+			toast.className = 'upload-toast error';
+		}
+		toast.innerHTML = `
+			<div class="upload-toast-header">
+				<div class="upload-toast-title">✗ 上传失败</div>
+				<button class="upload-toast-close" onclick="this.parentElement.parentElement.remove()">×</button>
+			</div>
+			<div class="upload-toast-filename">${fileName}</div>
+			<div class="upload-toast-error">${errorMessage}</div>
+		`;
+		// Auto-remove after 8 seconds
+		setTimeout(() => {
+			if (toast && toast.parentElement) {
+				toast.remove();
+				if (currentUploadToast === toast) {
+					currentUploadToast = null;
+				}
+			}
+		}, 8000);
+	}
+
+	function formatFileSize(bytes) {
+		if (bytes === 0) return '0 B';
+		const k = 1024;
+		const sizes = ['B', 'KB', 'MB', 'GB'];
+		const i = Math.floor(Math.log(bytes) / Math.log(k));
+		return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+	}
+
+	// Listen for upload events
+	window.addEventListener('message', (event) => {
+		if (event.origin !== window.location.origin) return;
+		if (event.data.type !== 'fileUpload') return;
+
+		const { status, fileName, progress, fileSize, message } = event.data.payload;
+
+		if (status === 'start') {
+			showUploadToast(fileName, fileSize);
+		} else if (status === 'progress') {
+			updateUploadProgress(currentUploadToast, progress, fileName);
+		} else if (status === 'end') {
+			showUploadSuccess(currentUploadToast, fileName);
+		} else if (status === 'error') {
+			showUploadError(currentUploadToast, fileName, message || '未知错误');
+		}
+	});
+
 	function uploadFileObject(file, pathToSend) {
 		return new Promise((resolve, reject) => {
 			window.postMessage({
@@ -1498,6 +1723,28 @@ export default function webrtc() {
 			});
 			taskbar.appendChild(pwdBtn);
 
+			// File upload button
+			const uploadSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`;
+			const uploadBtn = document.createElement('div');
+			uploadBtn.className = 'taskbar-pin disabled';  // 初始为禁用状态
+			uploadBtn.id = 'upload-btn';
+			uploadBtn.innerHTML = uploadSvg;
+			uploadBtn.title = '上传文件到桌面';
+			uploadBtn.addEventListener('click', (e) => {
+				e.stopPropagation();
+				// Check if WebRTC data channel is open
+				if (!webrtc || !webrtc._send_channel || webrtc._send_channel.readyState !== 'open') {
+					console.warn('Cannot upload: data channel not ready');
+					return;
+				}
+				// Trigger file input
+				const hiddenInput = document.getElementById('globalFileInput');
+				if (hiddenInput) {
+					hiddenInput.click();
+				}
+			});
+			taskbar.appendChild(uploadBtn);
+
 			const connIndicator = document.createElement('div');
 			connIndicator.className = 'taskbar-conn';
 			connIndicator.id = 'conn-indicator';
@@ -1695,6 +1942,12 @@ export default function webrtc() {
 					input.toggleImeMode();
 				}
 
+				// Enable upload button
+				const uploadBtn = document.getElementById('upload-btn');
+				if (uploadBtn) {
+					uploadBtn.classList.remove('disabled');
+				}
+
 				// Send client-side metrics over data channel every 5 seconds
 				if (metricsLoopId) {
 					clearInterval(metricsLoopId);
@@ -1707,6 +1960,11 @@ export default function webrtc() {
 
 			webrtc.ondatachannelclose = () => {
 				input.detach();
+				// Disable upload button
+				const uploadBtn = document.getElementById('upload-btn');
+				if (uploadBtn) {
+					uploadBtn.classList.add('disabled');
+				}
 			}
 
 			input.onmenuhotkey = () => {
