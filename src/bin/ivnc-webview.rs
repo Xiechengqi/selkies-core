@@ -10,7 +10,6 @@ use tao::platform::unix::EventLoopBuilderExtUnix;
 use tao::window::WindowBuilder;
 use tao::platform::unix::WindowExtUnix;
 use wry::{WebViewBuilder, WebViewBuilderExtUnix, WebViewExtUnix};
-use webkit2gtk::WebViewExt;
 use gtk::prelude::*;
 
 fn main() {

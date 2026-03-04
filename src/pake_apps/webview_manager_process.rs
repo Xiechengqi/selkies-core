@@ -7,7 +7,6 @@ use super::datadir;
 
 /// Process information for a WebView instance
 struct WebViewProcess {
-    app_id: String,
     app_name: String,
     child: Child,
     pid: u32,
@@ -28,10 +27,19 @@ impl WebViewManager {
         let webview_binary = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|p| p.join("ivnc-webview")))
-            .and_then(|p| p.to_str().map(String::from))
+            .and_then(|p| {
+                if p.exists() {
+                    p.canonicalize().ok().and_then(|cp| cp.to_str().map(String::from))
+                } else {
+                    None
+                }
+            })
             .unwrap_or_else(|| "ivnc-webview".to_string());
 
         info!("WebView binary path: {}", webview_binary);
+        if !std::path::Path::new(&webview_binary).exists() {
+            warn!("WebView binary not found at: {}", webview_binary);
+        }
 
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
@@ -83,7 +91,6 @@ impl WebViewManager {
                             Ok((child, pid)) => {
                                 info!("Watchdog: restarted webview '{}' (pid={})", app.name, pid);
                                 mgr_ref.lock().unwrap().insert(app_id, WebViewProcess {
-                                    app_id: app.id.clone(),
                                     app_name: app.name.clone(),
                                     child,
                                     pid,
@@ -114,7 +121,6 @@ impl WebViewManager {
         let (child, pid) = spawn_webview_process(app, &self.webview_binary)?;
 
         self.processes.lock().unwrap().insert(app.id.clone(), WebViewProcess {
-            app_id: app.id.clone(),
             app_name: app.name.clone(),
             child,
             pid,
@@ -168,6 +174,7 @@ impl WebViewManager {
     }
 
     /// Get PID of a WebView process
+    #[allow(dead_code)]
     pub fn pid(&self, app_id: &str) -> Option<u32> {
         let processes = self.processes.lock().unwrap();
         processes.get(app_id).map(|p| p.pid)
@@ -202,6 +209,11 @@ fn get_log_path(app_id: &str) -> std::path::PathBuf {
 
 /// Spawn a webview process for the given app, returns (Child, pid)
 fn spawn_webview_process(app: &PakeApp, webview_binary: &str) -> Result<(std::process::Child, u32), String> {
+    // Check if webview binary exists
+    if !std::path::Path::new(webview_binary).exists() {
+        return Err(format!("WebView binary not found: {}", webview_binary));
+    }
+
     let data_dir = datadir::data_dir(app);
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| format!("Failed to create data dir: {}", e))?;
@@ -214,9 +226,8 @@ fn spawn_webview_process(app: &PakeApp, webview_binary: &str) -> Result<(std::pr
     let wayland_display = std::env::var("WAYLAND_DISPLAY")
         .unwrap_or_else(|_| "wayland-1".to_string());
 
-    let webview_dir = std::path::Path::new(webview_binary)
-        .parent()
-        .ok_or("Invalid webview binary path")?;
+    let webview_path = std::path::Path::new(webview_binary);
+    let webview_dir = webview_path.parent().ok_or("Invalid webview binary path")?;
 
     let safe_app_name = app.name
         .chars()
@@ -225,10 +236,15 @@ fn spawn_webview_process(app: &PakeApp, webview_binary: &str) -> Result<(std::pr
 
     let app_symlink = webview_dir.join(&safe_app_name);
     let _ = std::fs::remove_file(&app_symlink);
-    std::os::unix::fs::symlink(webview_binary, &app_symlink)
-        .map_err(|e| format!("Failed to create symlink: {}", e))?;
 
-    info!("Spawning WebView: {} -> {} (WAYLAND_DISPLAY={})", app_symlink.display(), webview_binary, wayland_display);
+    // Use absolute path for symlink target
+    let abs_webview_binary = webview_path.canonicalize()
+        .unwrap_or_else(|_| webview_path.to_path_buf());
+
+    std::os::unix::fs::symlink(&abs_webview_binary, &app_symlink)
+        .map_err(|e| format!("Failed to create symlink {} -> {}: {}", app_symlink.display(), abs_webview_binary.display(), e))?;
+
+    info!("Spawning WebView: {} -> {} (WAYLAND_DISPLAY={})", app_symlink.display(), abs_webview_binary.display(), wayland_display);
 
     let child = Command::new(&app_symlink)
         .env("IVNC_APP_ID", &app.id)
@@ -241,7 +257,8 @@ fn spawn_webview_process(app: &PakeApp, webview_binary: &str) -> Result<(std::pr
         .env("GDK_BACKEND", "wayland")
         .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()))
         .spawn()
-        .map_err(|e| format!("Failed to spawn WebView process: {}", e))?;
+        .map_err(|e| format!("Failed to spawn WebView process {}: {} (binary: {}, symlink exists: {})",
+            app_symlink.display(), e, abs_webview_binary.display(), app_symlink.exists()))?;
 
     let pid = child.id();
     info!("WebView process started with PID: {}", pid);

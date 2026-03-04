@@ -2150,6 +2150,10 @@ export default function webrtc() {
 					tb.classList.remove('visible');
 					return;
 				}
+				// Show taskbar when windows appear (if not pinned, it will auto-hide based on mouse position)
+				if (!taskbarPinned) {
+					tb.classList.add('visible');
+				}
 				wins.forEach((w) => {
 					const item = document.createElement('div');
 					item.className = 'taskbar-item' + (w.focused ? ' focused' : '');

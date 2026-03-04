@@ -2,8 +2,6 @@ use wry::{WebViewBuilder, WebViewBuilderExtUnix, WebViewExtUnix};
 use tao::window::WindowBuilder;
 use tao::platform::unix::WindowExtUnix;
 use gtk::prelude::*;
-use gtk::gdk;
-use webkit2gtk::WebViewExt;
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 use std::fs::{File, OpenOptions};
@@ -14,8 +12,8 @@ use super::datadir;
 
 /// A WebView instance for a Pake app
 /// Note: Must be created and used on the same thread (GTK/tao thread)
+#[allow(dead_code)]
 pub struct WebViewInstance {
-    pub app_id: String,
     pub app_name: String,
     pub window_id: tao::window::WindowId,
     pub is_open: Arc<Mutex<bool>>,
@@ -25,6 +23,7 @@ pub struct WebViewInstance {
     _webview: wry::WebView,
 }
 
+#[allow(dead_code)]
 impl WebViewInstance {
     /// Create a new WebView instance for the given app
     /// This must be called on the tao/GTK event loop thread
@@ -72,8 +71,6 @@ impl WebViewInstance {
         if let Some(gdk_window) = gtk_window.window() {
             #[cfg(target_os = "linux")]
             {
-                use gdk::prelude::*;
-
                 // Set window role
                 gtk_window.set_role(&app.name);
 
@@ -106,9 +103,6 @@ impl WebViewInstance {
         };
 
         info!("GTK container created");
-
-        // Get data directory (already set in env vars above)
-        let data_dir = datadir::data_dir(app);
 
         // Create log file for console output
         let log_file_path = get_log_path(&app.id);
@@ -163,7 +157,6 @@ impl WebViewInstance {
         // Note: Window close handling will be done in the event loop
 
         Ok(Self {
-            app_id: app.id.clone(),
             app_name: app.name.clone(),
             window_id,
             is_open,
@@ -185,6 +178,7 @@ impl WebViewInstance {
 }
 
 /// Get log file path for a webview app
+#[allow(dead_code)]
 fn get_log_path(app_id: &str) -> PathBuf {
     let dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("/root/.config"))
@@ -196,6 +190,7 @@ fn get_log_path(app_id: &str) -> PathBuf {
 }
 
 /// Generate initialization script for WebView with console logging via IPC
+#[allow(dead_code)]
 fn get_init_script_with_logging(app: &PakeApp, _log_file: Arc<Mutex<File>>) -> String {
     let dark_mode_script = if app.dark_mode {
         r#"
@@ -275,6 +270,7 @@ fn get_init_script_with_logging(app: &PakeApp, _log_file: Arc<Mutex<File>>) -> S
 }
 
 /// Generate initialization script for WebView
+#[allow(dead_code)]
 fn get_init_script(app: &PakeApp) -> String {
     if app.dark_mode {
         r#"
