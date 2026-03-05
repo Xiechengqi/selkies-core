@@ -664,7 +664,7 @@ function showForceUpdateModal() {
 	dialog.innerHTML = `
 		<h3>强制更新</h3>
 		<div class="update-info" id="update-info">
-			<p>正在检查更新...</p>
+			<p class="update-warning">⚠️ 更新过程中服务将短暂中断</p>
 		</div>
 		<div class="update-progress" id="update-progress" style="display:none;">
 			<div class="progress-bar">
@@ -675,7 +675,7 @@ function showForceUpdateModal() {
 		<div class="update-logs" id="update-logs" style="display:none;"></div>
 		<div class="update-btns" id="update-btns">
 			<button class="update-cancel" id="update-cancel">取消</button>
-			<button class="update-ok" id="update-ok" disabled>开始更新</button>
+			<button class="update-ok" id="update-ok">开始更新</button>
 		</div>
 	`;
 	overlay.appendChild(dialog);
@@ -698,37 +698,7 @@ function showForceUpdateModal() {
 	overlay.addEventListener('click', (e) => { if (e.target === overlay && !isUpdating) close(); });
 	cancelBtn.addEventListener('click', close);
 
-	// Check for updates
-	fetch('/api/version')
-		.then(resp => resp.json())
-		.then(data => {
-			if (data.has_update) {
-				infoDiv.innerHTML = `
-					<p>当前版本: <strong>${data.current}</strong></p>
-					<p>最新版本: <strong>${data.latest}</strong></p>
-					<p class="update-warning">⚠️ 更新过程中服务将短暂中断</p>
-				`;
-				okBtn.disabled = false;
-			} else {
-				infoDiv.innerHTML = `
-					<p>当前版本: <strong>${data.current}</strong></p>
-					<p class="update-ok-msg">✓ 已是最新版本</p>
-				`;
-				okBtn.textContent = '关闭';
-				okBtn.disabled = false;
-				okBtn.addEventListener('click', close);
-			}
-		})
-		.catch(err => {
-			infoDiv.innerHTML = `<p class="update-error">检查更新失败: ${err.message}</p>`;
-		});
-
 	okBtn.addEventListener('click', () => {
-		if (okBtn.textContent === '关闭') {
-			close();
-			return;
-		}
-
 		if (!confirm('确定要强制更新到最新版本吗？\n更新过程中服务将短暂中断。')) {
 			return;
 		}

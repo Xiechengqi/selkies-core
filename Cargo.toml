@@ -1,6 +1,6 @@
 [package]
 name = "ivnc"
-version = "0.2.0"
+version = "0.0.0"
 edition = "2021"
 description = "iVnc - WebRTC + GStreamer + Wayland compositor streaming core"
 authors = ["iVnc Team"]
