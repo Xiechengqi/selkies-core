@@ -12,8 +12,7 @@ use crate::web::embedded_assets::{get_embedded_file, has_embedded_assets};
 use crate::web::shared::SharedState;
 use axum::{
     body::Body,
-    extract::State,
-    extract::WebSocketUpgrade,
+    extract::{Query, State, WebSocketUpgrade},
     http::{header, Request, StatusCode, Uri},
     middleware,
     response::Response,
@@ -25,6 +24,7 @@ use hyper_util::rt::TokioIo;
 use log::{info, warn, debug};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::AsyncReadExt;
 #[cfg(feature = "tls")]
 use tokio::io::AsyncWriteExt;
@@ -32,6 +32,7 @@ use tokio::net::TcpListener;
 use tower::Service;
 use tower_http::services::{ServeDir, ServeFile};
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::webrtc::SessionManager;
@@ -125,6 +126,8 @@ pub async fn run_http_server_with_webrtc(
         .route("/ui-config", get(ui_config_handler))
         .route("/ws-config", get(ws_config_handler))
         .route("/api/change-password", post(change_password_handler))
+        .route("/api/version", get(get_version_handler))
+        .route("/api/upgrade/ws", get(upgrade_ws_handler))
         ;
 
     // Add WebRTC signaling endpoint if session manager is provided
@@ -628,4 +631,483 @@ async fn console_handler() -> Response {
         .header(header::CACHE_CONTROL, "no-store, max-age=0")
         .body(Body::from(html))
         .unwrap()
+}
+
+// ============================================================================
+// Force Update Feature
+// ============================================================================
+
+/// Version information
+#[derive(Serialize, Clone)]
+struct VersionInfo {
+    current: String,
+    latest: String,
+    has_update: bool,
+    download_url: String,
+}
+
+/// Upgrade log entry for WebSocket streaming
+#[derive(Clone, Serialize)]
+struct UpgradeLogEntry {
+    step: u8,
+    total_steps: u8,
+    message: String,
+    level: String,  // "info" | "error" | "success" | "progress"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress: Option<u8>,  // 0-100
+}
+
+/// GitHub Release response
+#[derive(Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+}
+
+/// WebSocket auth query
+#[derive(Deserialize)]
+struct WsAuthQuery {
+    token: Option<String>,
+}
+
+/// GET /api/version - Check for updates
+async fn get_version_handler() -> axum::Json<VersionInfo> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+
+    // Detect architecture
+    let arch = if cfg!(target_arch = "x86_64") {
+        "amd64"
+    } else if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        return axum::Json(VersionInfo {
+            current: current.clone(),
+            latest: current,
+            has_update: false,
+            download_url: String::new(),
+        });
+    };
+
+    // Fetch latest version from GitHub
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent("ivnc-updater")
+        .build() {
+        Ok(c) => c,
+        Err(_) => {
+            return axum::Json(VersionInfo {
+                current: current.clone(),
+                latest: current,
+                has_update: false,
+                download_url: String::new(),
+            });
+        }
+    };
+
+    let latest_version = match client
+        .get("https://api.github.com/repos/Xiechengqi/iVnc/releases/latest")
+        .send()
+        .await {
+        Ok(resp) => match resp.json::<GitHubRelease>().await {
+            Ok(release) => release.tag_name.trim_start_matches('v').to_string(),
+            Err(_) => current.clone(),
+        },
+        Err(_) => current.clone(),
+    };
+
+    let has_update = latest_version != current;
+    let download_url = format!(
+        "https://github.com/Xiechengqi/iVnc/releases/download/latest/ivnc-linux-{}",
+        arch
+    );
+
+    axum::Json(VersionInfo {
+        current,
+        latest: latest_version,
+        has_update,
+        download_url,
+    })
+}
+
+/// GET /api/upgrade/ws - WebSocket upgrade endpoint
+async fn upgrade_ws_handler(
+    State(state): State<Arc<SharedState>>,
+    Query(_query): Query<WsAuthQuery>,
+    headers: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    // Verify authentication if basic auth is enabled
+    if state.config.http.basic_auth_enabled {
+        // Check Authorization header
+        if let Some(auth_header) = headers.get(header::AUTHORIZATION) {
+            if let Ok(auth_str) = auth_header.to_str() {
+                if let Some(encoded) = auth_str.strip_prefix("Basic ") {
+                    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) {
+                        if let Ok(decoded_str) = String::from_utf8(decoded) {
+                            if let Some((user, pass)) = decoded_str.split_once(':') {
+                                // Read password override
+                                let expected_password = {
+                                    let guard = state.password_override.read().await;
+                                    match guard.as_deref() {
+                                        Some(overridden) => overridden.to_string(),
+                                        None => state.config.http.basic_auth_password.clone(),
+                                    }
+                                };
+
+                                if user == state.config.http.basic_auth_user && pass == expected_password {
+                                    return Ok(ws.on_upgrade(handle_upgrade_websocket));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Authentication failed
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    // No auth required, proceed
+    Ok(ws.on_upgrade(handle_upgrade_websocket))
+}
+
+/// Handle WebSocket connection for upgrade
+async fn handle_upgrade_websocket(mut socket: axum::extract::ws::WebSocket) {
+    use tokio::sync::mpsc;
+    use futures::SinkExt;
+
+    let (log_tx, mut log_rx) = mpsc::channel::<UpgradeLogEntry>(32);
+
+    // Spawn upgrade task
+    let mut upgrade_task = tokio::spawn(async move {
+        perform_upgrade_with_logs(log_tx).await
+    });
+
+    // Forward logs to WebSocket
+    loop {
+        tokio::select! {
+            Some(entry) = log_rx.recv() => {
+                let json = serde_json::to_string(&entry).unwrap_or_default();
+                if socket.send(axum::extract::ws::Message::Text(json.into())).await.is_err() {
+                    break;
+                }
+            }
+            _ = &mut upgrade_task => {
+                break;
+            }
+        }
+    }
+
+    // Drain remaining logs
+    while let Ok(entry) = log_rx.try_recv() {
+        let json = serde_json::to_string(&entry).unwrap_or_default();
+        let _ = socket.send(axum::extract::ws::Message::Text(json.into())).await;
+    }
+
+    let _ = socket.close().await;
+}
+
+/// Perform upgrade with real-time logging
+async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>) {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use futures::StreamExt;
+
+    let send_log = |step: u8, message: &str, level: &str, progress: Option<u8>| {
+        let entry = UpgradeLogEntry {
+            step,
+            total_steps: 10,
+            message: message.to_string(),
+            level: level.to_string(),
+            progress,
+        };
+        let tx = log_tx.clone();
+        async move {
+            let _ = tx.send(entry).await;
+        }
+    };
+
+    // Step 1: Detect architecture
+    send_log(1, "检测系统架构...", "info", None).await;
+    let arch = if cfg!(target_arch = "x86_64") {
+        "amd64"
+    } else if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        send_log(1, "不支持的系统架构", "error", None).await;
+        return;
+    };
+    send_log(1, &format!("系统架构: {}", arch), "success", None).await;
+
+    // Step 2: Build download URL
+    send_log(2, "准备下载最新版本...", "info", None).await;
+    let download_url = format!(
+        "https://github.com/Xiechengqi/iVnc/releases/download/latest/ivnc-linux-{}",
+        arch
+    );
+    send_log(2, &format!("下载地址: {}", download_url), "success", None).await;
+
+    // Step 3: Download new version
+    send_log(3, "开始下载...", "info", None).await;
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .user_agent("ivnc-updater")
+        .build() {
+        Ok(c) => c,
+        Err(e) => {
+            send_log(3, &format!("创建 HTTP 客户端失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+
+    let mut response = match client.get(&download_url).send().await {
+        Ok(r) => {
+            if !r.status().is_success() {
+                send_log(3, &format!("下载失败: HTTP {}", r.status()), "error", None).await;
+                return;
+            }
+            r
+        },
+        Err(e) => {
+            send_log(3, &format!("下载失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+
+    let total_size = response.content_length().unwrap_or(0);
+    let temp_path = format!("/tmp/ivnc-new-{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs());
+
+    let mut file = match tokio::fs::File::create(&temp_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            send_log(3, &format!("创建临时文件失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+
+    let mut downloaded = 0u64;
+    let mut last_progress = 0u8;
+
+    while let Some(chunk_result) = response.chunk().await.transpose() {
+        let chunk = match chunk_result {
+            Ok(c) => c,
+            Err(e) => {
+                send_log(3, &format!("下载数据失败: {}", e), "error", None).await;
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return;
+            }
+        };
+
+        if tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await.is_err() {
+            send_log(3, "写入文件失败", "error", None).await;
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return;
+        }
+
+        downloaded += chunk.len() as u64;
+        if total_size > 0 {
+            let progress = ((downloaded as f64 / total_size as f64) * 100.0) as u8;
+            if progress != last_progress && (progress % 5 == 0 || progress == 100) {
+                send_log(3, &format!("下载中... {}/{} MB",
+                    downloaded / 1024 / 1024,
+                    total_size / 1024 / 1024),
+                    "progress", Some(progress)).await;
+                last_progress = progress;
+            }
+        } else {
+            // No content-length, show downloaded bytes only
+            let current_mb = downloaded / 1024 / 1024;
+            if current_mb > 0 && current_mb % 5 == 0 && current_mb as u8 != last_progress {
+                send_log(3, &format!("下载中... {} MB", current_mb), "info", None).await;
+                last_progress = current_mb as u8;
+            }
+        }
+    }
+    drop(file);
+    send_log(3, "下载完成", "success", None).await;
+
+    // Step 4: Verify download
+    send_log(4, "验证下载文件...", "info", None).await;
+    let metadata = match tokio::fs::metadata(&temp_path).await {
+        Ok(m) => m,
+        Err(e) => {
+            send_log(4, &format!("读取文件信息失败: {}", e), "error", None).await;
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return;
+        }
+    };
+
+    if metadata.len() < 1024 * 1024 {
+        send_log(4, "下载文件过小，可能损坏", "error", None).await;
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return;
+    }
+    send_log(4, &format!("文件大小: {} MB", metadata.len() / 1024 / 1024), "success", None).await;
+
+    // Step 5: Backup current version
+    send_log(5, "备份当前版本...", "info", None).await;
+    let current_exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            send_log(5, &format!("获取当前程序路径失败: {}", e), "error", None).await;
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return;
+        }
+    };
+
+    let backup_path = format!("{}.backup-{}",
+        current_exe.display(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    );
+
+    if let Err(e) = tokio::fs::copy(&current_exe, &backup_path).await {
+        send_log(5, &format!("备份失败: {}", e), "error", None).await;
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return;
+    }
+    send_log(5, "备份完成", "success", None).await;
+
+    // Cleanup old backups (keep only the 3 most recent)
+    cleanup_old_backups(&current_exe).await;
+
+    // Step 6: Set permissions
+    send_log(6, "设置执行权限...", "info", None).await;
+    if let Err(e) = fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o755)) {
+        send_log(6, &format!("设置权限失败: {}", e), "error", None).await;
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return;
+    }
+    send_log(6, "权限设置完成", "success", None).await;
+
+    // Step 7: Replace binary
+    send_log(7, "替换程序文件...", "info", None).await;
+    if let Err(e) = tokio::fs::remove_file(&current_exe).await {
+        send_log(7, &format!("删除旧文件失败: {}", e), "error", None).await;
+        return;
+    }
+
+    if let Err(e) = tokio::fs::rename(&temp_path, &current_exe).await {
+        send_log(7, &format!("移动新文件失败: {}", e), "error", None).await;
+        // Try to restore backup
+        let _ = tokio::fs::copy(&backup_path, &current_exe).await;
+        return;
+    }
+    send_log(7, "文件替换完成", "success", None).await;
+
+    // Step 7.5: Verify new binary
+    send_log(7, "验证新版本...", "info", None).await;
+    match tokio::process::Command::new(&current_exe)
+        .arg("--version")
+        .output()
+        .await {
+        Ok(output) if output.status.success() => {
+            send_log(7, "新版本验证通过", "success", None).await;
+        }
+        _ => {
+            send_log(7, "新版本验证失败，恢复备份", "error", None).await;
+            // Restore backup
+            let _ = tokio::fs::copy(&backup_path, &current_exe).await;
+            return;
+        }
+    }
+
+    // Step 8: Cleanup
+    send_log(8, "清理临时文件...", "info", None).await;
+    let _ = tokio::fs::remove_file(&temp_path).await;
+    send_log(8, "清理完成", "success", None).await;
+
+    // Step 9: Prepare restart
+    send_log(9, "准备重启服务...", "info", None).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    send_log(9, "即将重启", "success", None).await;
+
+    // Step 10: Restart
+    send_log(10, "重启服务...", "info", None).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Try systemd restart first
+    if try_restart_systemd("ivnc").await.is_ok() {
+        return;
+    }
+
+    // Use exec to restart
+    use std::os::unix::process::CommandExt;
+    let args: Vec<String> = std::env::args().collect();
+    let err = std::process::Command::new(&current_exe)
+        .args(&args[1..])
+        .exec();
+
+    // If we reach here, exec failed
+    send_log(10, &format!("重启失败: {}", err), "error", None).await;
+
+    // Try to restore backup
+    let _ = fs::remove_file(&current_exe);
+    let _ = fs::copy(&backup_path, &current_exe);
+    let _ = fs::set_permissions(&current_exe, fs::Permissions::from_mode(0o755));
+}
+
+/// Try to restart via systemd
+async fn try_restart_systemd(service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let output = tokio::process::Command::new("systemctl")
+        .args(&["restart", service_name])
+        .output()
+        .await?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err("systemctl restart failed".into())
+    }
+}
+
+/// Cleanup old backup files, keeping only the most recent N backups
+async fn cleanup_old_backups(exe_path: &std::path::Path) {
+    use std::path::PathBuf;
+
+    let parent_dir = match exe_path.parent() {
+        Some(dir) => dir,
+        None => return,
+    };
+
+    let exe_name = match exe_path.file_name() {
+        Some(name) => name.to_string_lossy(),
+        None => return,
+    };
+
+    // Find all backup files
+    let mut backups: Vec<(PathBuf, u64)> = Vec::new();
+
+    if let Ok(mut entries) = tokio::fs::read_dir(parent_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Ok(file_name) = entry.file_name().into_string() {
+                // Match pattern: {exe_name}.backup-{timestamp}
+                if file_name.starts_with(&format!("{}.backup-", exe_name)) {
+                    if let Some(timestamp_str) = file_name.strip_prefix(&format!("{}.backup-", exe_name)) {
+                        if let Ok(timestamp) = timestamp_str.parse::<u64>() {
+                            backups.push((entry.path(), timestamp));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Keep only the 3 most recent backups
+    const KEEP_COUNT: usize = 3;
+    if backups.len() > KEEP_COUNT {
+        // Sort by timestamp (newest first)
+        backups.sort_by(|a, b| b.1.cmp(&a.1));
+
+        // Delete old backups
+        for (path, _) in backups.iter().skip(KEEP_COUNT) {
+            let _ = tokio::fs::remove_file(path).await;
+            info!("Cleaned up old backup: {:?}", path);
+        }
+    }
 }
