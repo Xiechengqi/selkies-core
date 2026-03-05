@@ -1337,7 +1337,21 @@ async fn run_async_services(
     let pake_state = match crate::pake_apps::api::PakeState::new() {
         Ok(ps) => {
             info!("Pake apps manager initialized");
-            Some(std::sync::Arc::new(ps))
+            let ps_arc = std::sync::Arc::new(ps);
+
+            // Restore previously running apps after update
+            let ps_clone = ps_arc.clone();
+            tokio::spawn(async move {
+                // Wait a bit for the system to stabilize
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                if let Err(e) = ps_clone.restore_running_state().await {
+                    log::warn!("Failed to restore running apps: {}", e);
+                } else {
+                    log::info!("Running apps restoration completed");
+                }
+            });
+
+            Some(ps_arc)
         }
         Err(e) => {
             warn!("Failed to init Pake apps manager: {}", e);

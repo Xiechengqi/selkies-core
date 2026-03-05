@@ -827,6 +827,17 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
         }
     };
 
+    // Step 0: Save running apps state (before upgrade)
+    send_log(0, "保存运行中的应用状态...", "info", None).await;
+    if let Ok(pake_state) = crate::pake_apps::api::PakeState::new() {
+        if let Err(e) = pake_state.save_running_state() {
+            log::warn!("Failed to save running apps state: {}", e);
+            send_log(0, &format!("保存应用状态失败: {}", e), "error", None).await;
+        } else {
+            send_log(0, "应用状态已保存", "success", None).await;
+        }
+    }
+
     // Step 1: Detect architecture
     send_log(1, "检测系统架构...", "info", None).await;
     let arch = if cfg!(target_arch = "x86_64") {

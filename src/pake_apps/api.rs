@@ -8,13 +8,14 @@ use axum::{
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
-use super::app::{PakeApp, AppMode};
+use super::app::{PakeApp, AppMode, AppStatus};
 use super::store::AppStore;
 use super::process::ProcessManager;
 use super::WebViewManager;
 use super::datadir;
 use super::autostart;
 use super::native;
+use super::state_recovery::AppRunningState;
 
 pub struct PakeState {
     pub store: Arc<AppStore>,
@@ -34,6 +35,78 @@ impl PakeState {
             process,
             webview: Arc::new(Mutex::new(webview_mgr)),
         })
+    }
+
+    /// Save current running apps state
+    pub fn save_running_state(&self) -> Result<(), String> {
+        let apps = self.store.list()?;
+        let running_ids: Vec<String> = apps.iter()
+            .filter(|app| {
+                let status = match app.mode {
+                    AppMode::Native => self.process.status(&app.id),
+                    AppMode::Webview => self.webview.lock().unwrap().status(&app.id),
+                };
+                matches!(status, AppStatus::Running)
+            })
+            .map(|app| app.id.clone())
+            .collect();
+
+        if running_ids.is_empty() {
+            log::info!("No running apps to save");
+            return Ok(());
+        }
+
+        let state = AppRunningState::new(running_ids);
+        state.save()
+    }
+
+    /// Restore previously running apps
+    pub async fn restore_running_state(&self) -> Result<(), String> {
+        let state = match AppRunningState::load() {
+            Ok(s) => s,
+            Err(_) => {
+                log::info!("No previous running state to restore");
+                return Ok(());
+            }
+        };
+
+        // Only restore if state is recent (within 5 minutes)
+        if !state.is_recent() {
+            log::info!("Running state is too old, skipping restore");
+            AppRunningState::clear()?;
+            return Ok(());
+        }
+
+        log::info!("Restoring {} running apps", state.app_ids.len());
+
+        for app_id in &state.app_ids {
+            match self.store.get(app_id) {
+                Ok(app) => {
+                    log::info!("Restoring app: {} ({})", app.name, app_id);
+                    let result = match app.mode {
+                        AppMode::Native => self.process.start(&app).map(|_| ()),
+                        AppMode::Webview => {
+                            self.webview.lock().unwrap().start(&app)
+                        }
+                    };
+
+                    if let Err(e) = result {
+                        log::warn!("Failed to restore app {}: {}", app_id, e);
+                    } else {
+                        // Small delay between starts to avoid overwhelming the system
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    }
+                }
+                Err(e) => {
+                    log::warn!("App {} not found in store: {}", app_id, e);
+                }
+            }
+        }
+
+        // Clear the state file after restoration
+        AppRunningState::clear()?;
+        log::info!("Running state restoration completed");
+        Ok(())
     }
 }
 
